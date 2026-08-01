@@ -1,0 +1,11 @@
+build/
+results/*.csv
+results/**/*.csv
+!results/.gitkeep
+.idea/
+.vscode/
+*.user
+*.swp
+__pycache__/
+*.py[cod]
+.venv/
