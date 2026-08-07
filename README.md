@@ -20,6 +20,10 @@ read replicas, and writes window-level measurements for later model training.
 The LSTM predictor and real RDMA CM/verbs transport are the next research stages. The current
 simulator does not claim to reproduce physical RDMA latency until its parameters are calibrated.
 
+The open-source selection and staged implementation plan are documented in
+[`docs/open-source-survey.md`](docs/open-source-survey.md). The project deliberately reuses small,
+understandable components instead of treating a large paper artifact as the thesis implementation.
+
 ## Build
 
 ```bash
@@ -57,6 +61,13 @@ docs/               Research design and upstream attribution
 results/            Generated CSV files (ignored by Git)
 third_party/         External research artifacts as Git submodules
 ```
+
+## Next implementation milestones
+
+1. Export time-ordered bucket sequences and train a small PyTorch LSTM offline.
+2. Replay frozen predictions through the same cost-aware decision used by the lightweight baseline.
+3. Split the KV core from its transport, then add local, socket, and CM/verbs transports in order.
+4. Calibrate copy and metadata costs with Soft-RoCE first and RDMA hardware when available.
 
 ## Research rule
 
