@@ -1,6 +1,8 @@
 build/
 results/*.csv
 results/**/*.csv
+results/**/*.log
+results/**/*.jsonl
 !results/.gitkeep
 .idea/
 .vscode/

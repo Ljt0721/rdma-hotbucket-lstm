@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  appendFileSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +15,9 @@ const dashboardRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const projectRoot = path.resolve(dashboardRoot, "..");
 const distRoot = path.join(dashboardRoot, "dist");
 const port = Number(process.env.DASHBOARD_PORT || 8787);
+const logDirectory = path.join(projectRoot, "results", "dashboard", "logs");
+const logPath = path.join(logDirectory, "dashboard-server.jsonl");
+mkdirSync(logDirectory, { recursive: true });
 
 const executableNames = process.platform === "win32"
   ? ["hotbucket_sim.exe"]
@@ -20,6 +30,50 @@ const executableCandidates = [
 
 function simulatorPath() {
   return executableCandidates.find((candidate) => existsSync(candidate));
+}
+
+function writeLog(level, event, details = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    event,
+    ...details,
+  };
+  const line = JSON.stringify(entry);
+  const output = level === "ERROR" ? console.error : level === "WARN" ? console.warn : console.log;
+  output(line);
+  try {
+    appendFileSync(logPath, `${line}\n`, "utf8");
+  } catch (error) {
+    console.error(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "ERROR",
+      event: "log_write_failed",
+      message: error.message,
+    }));
+  }
+  return entry;
+}
+
+function readRecentLogs(limit, runId) {
+  if (!existsSync(logPath)) return [];
+  const lines = readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
+  const selected = runId
+    ? lines.filter((line) => {
+        try {
+          return JSON.parse(line).runId === runId;
+        } catch {
+          return false;
+        }
+      })
+    : lines;
+  return selected.slice(-limit).map((line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return { timestamp: null, level: "ERROR", event: "invalid_log_line", raw: line };
+    }
+  });
 }
 
 function integerParam(params, name, fallback, minimum, maximum) {
@@ -40,6 +94,7 @@ function sendEvent(response, payload) {
 
 function startSimulation(request, response, url) {
   const executable = simulatorPath();
+  const runId = randomUUID();
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
@@ -48,8 +103,10 @@ function startSimulation(request, response, url) {
   });
 
   if (!executable) {
+    writeLog("ERROR", "simulator_not_found", { runId, candidates: executableCandidates });
     sendEvent(response, {
       type: "error",
+      runId,
       message: "Simulator executable was not found. Build it before starting the dashboard.",
     });
     response.end();
@@ -106,13 +163,28 @@ function startSimulation(request, response, url) {
   let stderrBuffer = "";
   let completed = false;
 
+  writeLog("INFO", "run_started", {
+    runId,
+    childPid: child.pid,
+    policy,
+    nodes,
+    buckets,
+    windows,
+    requestsPerWindow: requests,
+    threshold,
+    seed,
+    output: relativeOutputPath,
+  });
+
   sendEvent(response, {
     type: "started",
+    runId,
     policy,
     nodes,
     buckets,
     windows,
     output: relativeOutputPath,
+    logEndpoint: `/api/logs?runId=${encodeURIComponent(runId)}`,
   });
 
   child.stdout.setEncoding("utf8");
@@ -125,9 +197,32 @@ function startSimulation(request, response, url) {
       try {
         const payload = JSON.parse(line);
         if (payload.type === "complete") completed = true;
-        sendEvent(response, payload);
+        if (payload.type === "window") {
+          writeLog(payload.copyApplied ? "INFO" : "DEBUG", "window_completed", {
+            runId,
+            windowId: payload.windowId,
+            hotBucket: payload.hotBucket,
+            maxLoadRatio: payload.maxLoadRatio,
+            windowCompletionMs: payload.windowCompletionMs,
+            copyApplied: payload.copyApplied,
+            copyBucket: payload.decision?.bucketId ?? null,
+            copyTargetNode: payload.decision?.targetNode ?? null,
+          });
+        } else if (payload.type === "complete") {
+          writeLog("INFO", "simulation_completed", {
+            runId,
+            policy: payload.policy,
+            windows: payload.windows,
+            totalCompletionMs: payload.totalCompletionMs,
+            maxLoadRatio: payload.maxLoadRatio,
+            copies: payload.copies,
+            csv: payload.csv,
+          });
+        }
+        sendEvent(response, { ...payload, runId });
       } catch {
-        sendEvent(response, { type: "log", message: line });
+        writeLog("WARN", "unparsed_simulator_output", { runId, message: line });
+        sendEvent(response, { type: "log", runId, message: line });
       }
     }
   });
@@ -135,27 +230,39 @@ function startSimulation(request, response, url) {
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
     stderrBuffer += chunk;
+    writeLog("WARN", "simulator_stderr", { runId, message: chunk.trim() });
   });
 
   child.on("error", (error) => {
-    sendEvent(response, { type: "error", message: error.message });
+    writeLog("ERROR", "simulator_spawn_failed", { runId, message: error.message });
+    sendEvent(response, { type: "error", runId, message: error.message });
     response.end();
   });
 
   child.on("close", (code) => {
     if (code !== 0) {
+      writeLog("ERROR", "simulator_exited", {
+        runId,
+        exitCode: code,
+        stderr: stderrBuffer.trim() || null,
+      });
       sendEvent(response, {
         type: "error",
+        runId,
         message: stderrBuffer.trim() || `Simulator exited with code ${code}.`,
       });
     } else if (!completed) {
-      sendEvent(response, { type: "complete", policy, windows });
+      writeLog("WARN", "simulator_completed_without_summary", { runId, exitCode: code });
+      sendEvent(response, { type: "complete", runId, policy, windows });
     }
     response.end();
   });
 
   request.on("close", () => {
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode === null) {
+      writeLog("INFO", "client_disconnected", { runId, childPid: child.pid });
+      child.kill();
+    }
   });
 }
 
@@ -189,7 +296,22 @@ const server = createServer((request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   if (request.method === "GET" && url.pathname === "/api/health") {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: true, simulator: simulatorPath() || null }));
+    response.end(JSON.stringify({
+      ok: true,
+      simulator: simulatorPath() || null,
+      log: path.relative(projectRoot, logPath),
+    }));
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/logs") {
+    const limit = integerParam(url.searchParams, "limit", 200, 1, 2000);
+    const runId = url.searchParams.get("runId") || null;
+    response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      log: path.relative(projectRoot, logPath),
+      runId,
+      entries: readRecentLogs(limit, runId),
+    }));
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/simulate") {
@@ -200,5 +322,9 @@ const server = createServer((request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Simulation API: http://127.0.0.1:${port}`);
+  writeLog("INFO", "server_started", {
+    port,
+    simulator: simulatorPath() || null,
+    log: path.relative(projectRoot, logPath),
+  });
 });

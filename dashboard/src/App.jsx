@@ -9,6 +9,7 @@ import {
   Play,
   Server,
   Square,
+  TerminalSquare,
 } from "lucide-react";
 
 const initialSettings = {
@@ -177,6 +178,8 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [latest, setLatest] = useState(null);
   const [message, setMessage] = useState("Ready");
+  const [debugLogs, setDebugLogs] = useState([]);
+  const [logEndpoint, setLogEndpoint] = useState("/api/logs");
   const sourceRef = useRef(null);
 
   useEffect(() => () => sourceRef.current?.close(), []);
@@ -189,6 +192,13 @@ export default function App() {
     : 0;
 
   const eventRows = useMemo(() => history.slice(-7).reverse(), [history]);
+
+  function appendDebug(level, text) {
+    setDebugLogs((current) => [
+      ...current,
+      { time: new Date().toLocaleTimeString("en-GB"), level, text },
+    ].slice(-80));
+  }
 
   function changeSetting(event) {
     const { name, value } = event.target;
@@ -210,6 +220,7 @@ export default function App() {
     sourceRef.current?.close();
     setHistory([]);
     setLatest(null);
+    setDebugLogs([]);
     setStatus("running");
     setMessage("Starting simulator");
 
@@ -222,17 +233,28 @@ export default function App() {
     source.onmessage = (event) => {
       const payload = JSON.parse(event.data);
       if (payload.type === "started") {
+        setLogEndpoint(payload.logEndpoint || "/api/logs");
+        appendDebug("INFO", `Run ${payload.runId} started with child simulator`);
+        appendDebug("INFO", `${payload.policy}, ${payload.nodes} nodes, ${payload.buckets} buckets`);
         setMessage(`${policyLabels[payload.policy]} · ${payload.nodes} nodes · ${payload.buckets} buckets`);
       } else if (payload.type === "window") {
         setLatest(payload);
         setHistory((current) => [...current, payload]);
+        appendDebug(
+          payload.copyApplied ? "INFO" : "DEBUG",
+          payload.copyApplied
+            ? `W${payload.windowId + 1}: copied bucket ${payload.decision?.bucketId} to node ${payload.decision?.targetNode}`
+            : `W${payload.windowId + 1}: hot bucket ${payload.hotBucket}, load ${formatNumber(payload.maxLoadRatio * 100, 1)}%`,
+        );
         setMessage(`Window ${payload.windowId + 1} of ${payload.windowCount}`);
       } else if (payload.type === "complete") {
+        appendDebug("INFO", `Completed with ${payload.copies ?? 0} copies in ${formatNumber(payload.totalCompletionMs, 2)} ms`);
         setStatus("complete");
         setMessage(`Complete · CSV saved to ${payload.csv || "results/dashboard"}`);
         source.close();
         sourceRef.current = null;
       } else if (payload.type === "error") {
+        appendDebug("ERROR", payload.message);
         setStatus("error");
         setMessage(payload.message);
         source.close();
@@ -418,6 +440,23 @@ export default function App() {
                     {!eventRows.length && <tr><td colSpan="5" className="table-empty">No windows received</td></tr>}
                   </tbody>
                 </table>
+              </div>
+            </section>
+
+            <section className="panel debug-panel">
+              <div className="section-heading">
+                <div><TerminalSquare size={18} /><h2>Debug log</h2></div>
+                <a href={logEndpoint} target="_blank" rel="noreferrer">Open backend JSON</a>
+              </div>
+              <div className="debug-console" role="log" aria-live="polite">
+                {debugLogs.map((entry, index) => (
+                  <div className="debug-line" key={`${entry.time}-${index}`}>
+                    <span className="log-time">{entry.time}</span>
+                    <span className={`log-level ${entry.level.toLowerCase()}`}>{entry.level}</span>
+                    <span>{entry.text}</span>
+                  </div>
+                ))}
+                {!debugLogs.length && <div className="debug-empty">No backend events</div>}
               </div>
             </section>
           </div>

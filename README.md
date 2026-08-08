@@ -96,6 +96,23 @@ npm run dev
 The React development server uses port `5173`; the local simulation API uses port `8787`. Every run
 also writes its full CSV data under `results/dashboard/`.
 
+### Debug logs
+
+The Node service writes structured JSONL logs to:
+
+```text
+results/dashboard/logs/dashboard-server.jsonl
+```
+
+Each run has a UUID `runId`. Log entries record simulator startup, child PID, sanitized run settings,
+every completed window, copy decisions, stderr, client disconnects, completion, and exit failures.
+The dashboard shows recent events, while the complete backend log is available at:
+
+```text
+http://127.0.0.1:8787/api/logs
+http://127.0.0.1:8787/api/logs?runId=<run-id>&limit=200
+```
+
 ## Repository layout
 
 ```text
