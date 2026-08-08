@@ -9,3 +9,5 @@ results/**/*.csv
 __pycache__/
 *.py[cod]
 .venv/
+dashboard/node_modules/
+dashboard/dist/

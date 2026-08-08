@@ -2,12 +2,15 @@
 #include "hotbucket/policies.hpp"
 #include "hotbucket/workload.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -17,6 +20,8 @@ struct CommandLine {
     std::string policy{"no-action"};
     std::string output{"results/run.csv"};
     std::size_t severe_get_threshold{1200};
+    std::size_t window_delay_ms{0};
+    bool stream_json{false};
 };
 
 std::string RequireValue(int& index, int argc, char** argv) {
@@ -68,6 +73,10 @@ CommandLine ParseArguments(int argc, char** argv) {
             command.severe_get_threshold = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--seed") {
             command.config.seed = std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--window-delay-ms") {
+            command.window_delay_ms = std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--stream-json") {
+            command.stream_json = true;
         } else if (argument == "--help") {
             std::cout
                 << "Usage: hotbucket_sim [options]\n"
@@ -77,6 +86,7 @@ CommandLine ParseArguments(int argc, char** argv) {
                 << "  --read-ratio R --hotspot-share R --base-latency-us R\n"
                 << "  --bucket-size-mib R --copy-bandwidth-mib-per-ms R\n"
                 << "  --metadata-cost-ms R\n"
+                << "  --stream-json --window-delay-ms N\n"
                 << "  --output path/to/result.csv\n";
             std::exit(0);
         } else {
@@ -124,6 +134,107 @@ void WriteWindow(std::ofstream& output,
     }
 }
 
+std::string JsonEscape(const std::string& value) {
+    std::ostringstream escaped;
+    for (const char character : value) {
+        switch (character) {
+            case '\\':
+                escaped << "\\\\";
+                break;
+            case '"':
+                escaped << "\\\"";
+                break;
+            case '\n':
+                escaped << "\\n";
+                break;
+            case '\r':
+                escaped << "\\r";
+                break;
+            case '\t':
+                escaped << "\\t";
+                break;
+            default:
+                escaped << character;
+                break;
+        }
+    }
+    return escaped.str();
+}
+
+void StreamWindowJson(const std::string& policy,
+                      const hotbucket::SimulationConfig& config,
+                      const hotbucket::WindowResult& result,
+                      double total_completion_ms,
+                      std::size_t copies) {
+    std::cout << std::fixed << std::setprecision(4)
+              << "{\"type\":\"window\",\"policy\":\"" << JsonEscape(policy)
+              << "\",\"windowId\":" << result.window_id
+              << ",\"windowCount\":" << config.window_count
+              << ",\"hotBucket\":" << result.generated_hot_bucket
+              << ",\"maxLoadRatio\":" << result.cluster_max_load_ratio
+              << ",\"windowCompletionMs\":" << result.window_completion_ms
+              << ",\"totalCompletionMs\":" << total_completion_ms
+              << ",\"copyApplied\":" << (result.copy_applied ? "true" : "false")
+              << ",\"copyCostMs\":" << result.copy_cost_ms
+              << ",\"copies\":" << copies << ",\"decision\":";
+
+    if (result.decision.has_value()) {
+        const auto& decision = *result.decision;
+        std::cout << "{\"bucketId\":" << decision.bucket_id
+                  << ",\"targetNode\":" << decision.target_node
+                  << ",\"predictedGets\":" << decision.predicted_gets
+                  << ",\"expectedBenefitMs\":" << decision.expected_benefit_ms
+                  << ",\"expectedCostMs\":" << decision.expected_cost_ms
+                  << ",\"reason\":\"" << JsonEscape(decision.reason) << "\"}";
+    } else {
+        std::cout << "null";
+    }
+
+    std::cout << ",\"nodes\":[";
+    for (std::size_t node = 0; node < result.node_operations.size(); ++node) {
+        if (node > 0) {
+            std::cout << ',';
+        }
+        const double load_ratio = static_cast<double>(result.node_operations[node]) /
+                                  static_cast<double>(config.node_capacity_per_window);
+        std::cout << "{\"id\":" << node << ",\"operations\":"
+                  << result.node_operations[node] << ",\"loadRatio\":" << load_ratio << '}';
+    }
+
+    std::cout << "],\"buckets\":[";
+    for (std::size_t index = 0; index < result.buckets.size(); ++index) {
+        if (index > 0) {
+            std::cout << ',';
+        }
+        const auto& bucket = result.buckets[index];
+        std::cout << "{\"id\":" << bucket.bucket_id
+                  << ",\"homeNode\":" << bucket.home_node
+                  << ",\"gets\":" << bucket.get_count
+                  << ",\"puts\":" << bucket.put_count
+                  << ",\"replicas\":" << bucket.replica_count
+                  << ",\"meanLatencyUs\":" << bucket.mean_latency_us
+                  << ",\"p99LatencyUs\":" << bucket.p99_latency_us
+                  << ",\"homeLoadRatio\":" << bucket.home_node_load_ratio
+                  << ",\"isHot\":" << (bucket.generated_hot_bucket ? "true" : "false") << '}';
+    }
+    std::cout << "]}" << std::endl;
+}
+
+void StreamCompleteJson(const std::string& policy,
+                        std::size_t windows,
+                        double total_completion_ms,
+                        double max_load_ratio,
+                        std::size_t copies,
+                        const std::filesystem::path& output_path) {
+    std::cout << std::fixed << std::setprecision(4)
+              << "{\"type\":\"complete\",\"policy\":\"" << JsonEscape(policy)
+              << "\",\"windows\":" << windows
+              << ",\"totalCompletionMs\":" << total_completion_ms
+              << ",\"maxLoadRatio\":" << max_load_ratio
+              << ",\"copies\":" << copies
+              << ",\"csv\":\"" << JsonEscape(output_path.string()) << "\"}" << std::endl;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -169,16 +280,29 @@ int main(int argc, char** argv) {
             total_completion_ms += result.window_completion_ms;
             max_load_ratio = std::max(max_load_ratio, result.cluster_max_load_ratio);
             copies += copy_applied ? 1 : 0;
+
+            if (command.stream_json) {
+                StreamWindowJson(policy->Name(), command.config, result, total_completion_ms, copies);
+                if (command.window_delay_ms > 0) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(command.window_delay_ms));
+                }
+            }
             history.push_back(std::move(result));
         }
 
-        std::cout << "policy=" << policy->Name() << '\n'
-                  << "windows=" << command.config.window_count << '\n'
-                  << "total_completion_ms=" << std::fixed << std::setprecision(3)
-                  << total_completion_ms << '\n'
-                  << "max_node_load_ratio=" << max_load_ratio << '\n'
-                  << "copies=" << copies << '\n'
-                  << "csv=" << output_path.string() << '\n';
+        if (command.stream_json) {
+            StreamCompleteJson(policy->Name(), command.config.window_count, total_completion_ms,
+                               max_load_ratio, copies, output_path);
+        } else {
+            std::cout << "policy=" << policy->Name() << '\n'
+                      << "windows=" << command.config.window_count << '\n'
+                      << "total_completion_ms=" << std::fixed << std::setprecision(3)
+                      << total_completion_ms << '\n'
+                      << "max_node_load_ratio=" << max_load_ratio << '\n'
+                      << "copies=" << copies << '\n'
+                      << "csv=" << output_path.string() << '\n';
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';

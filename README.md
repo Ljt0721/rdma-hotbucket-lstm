@@ -26,6 +26,28 @@ understandable components instead of treating a large paper artifact as the thes
 
 ## Build
 
+### Windows quick start
+
+Build the simulator and tests with the installed MinGW compiler:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+```
+
+Run one policy directly:
+
+```powershell
+.\build\hotbucket_sim.exe --policy recent-window --output results\recent-window.csv
+```
+
+Run all current policies against the same generated request trace:
+
+```powershell
+python scripts\run_baselines.py --executable .\build\hotbucket_sim.exe
+```
+
+### CMake build
+
 ```bash
 cmake -S . -B build
 cmake --build build
@@ -48,6 +70,31 @@ To run all current baselines with exactly the same configuration:
 ```bash
 python scripts/run_baselines.py --executable ./build/hotbucket_sim
 ```
+
+## Live dashboard
+
+The dashboard streams each completed simulator window through a local Server-Sent Events endpoint.
+It displays logical node load, hot-bucket movement, GET/PUT activity, copy decisions, and simulated
+completion time. It is a view of the current mathematical simulator, not physical RDMA traffic.
+
+On Windows, the complete start command is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_dashboard.ps1
+```
+
+Then open [http://127.0.0.1:5173](http://127.0.0.1:5173). The first run installs the dashboard's
+Node packages. To start it manually:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+cd dashboard
+npm install
+npm run dev
+```
+
+The React development server uses port `5173`; the local simulation API uses port `8787`. Every run
+also writes its full CSV data under `results/dashboard/`.
 
 ## Repository layout
 
