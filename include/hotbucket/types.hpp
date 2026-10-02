@@ -20,13 +20,15 @@ struct Request {
 };
 
 struct SimulationConfig {
-    std::size_t node_count{4};
-    std::size_t bucket_count{128};
+    std::size_t node_count{5};
+    std::size_t bucket_count{64};
+    std::size_t entity_count{10};
     std::size_t window_count{40};
     std::size_t requests_per_window{4000};
     std::size_t hotspot_duration_windows{5};
     std::size_t node_capacity_per_window{1800};
     std::size_t replica_ttl_windows{3};
+    std::string workload_pattern{"step"};
     double read_ratio{0.90};
     double hotspot_share{0.65};
     double base_latency_us{5.0};
@@ -43,6 +45,12 @@ struct ReplicationDecision {
     double expected_benefit_ms{};
     double expected_cost_ms{};
     std::string reason;
+    double hotspot_probability{};
+};
+
+struct ReplicaLocation {
+    std::size_t bucket_id{};
+    std::size_t node_id{};
 };
 
 struct BucketWindowMetrics {
@@ -65,6 +73,7 @@ struct WindowResult {
     double cluster_max_load_ratio{};
     double window_completion_ms{};
     double copy_cost_ms{};
+    double control_overhead_ms{};
     std::optional<ReplicationDecision> decision;
     bool copy_applied{false};
 };

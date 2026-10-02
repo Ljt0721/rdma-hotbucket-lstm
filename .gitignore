@@ -1,6 +1,9 @@
 build/
+build-*/
 results/*.csv
 results/**/*.csv
+results/**/*.log
+results/**/*.jsonl
 !results/.gitkeep
 .idea/
 .vscode/
@@ -9,3 +12,9 @@ results/**/*.csv
 __pycache__/
 *.py[cod]
 .venv/
+data/traces/
+data/training/
+data/predictions/
+models/
+dashboard/node_modules/
+dashboard/dist/

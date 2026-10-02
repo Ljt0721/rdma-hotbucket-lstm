@@ -6,7 +6,7 @@ easy to reproduce. The default values are defined in `SimulationConfig`.
 Example:
 
 ```bash
-./build/hotbucket_sim --policy no-action --nodes 4 --buckets 128 \
+./build/hotbucket_sim --policy no-action --nodes 5 --buckets 64 --entities 10 \
   --windows 40 --requests 4000 --node-capacity 1800 \
   --read-ratio 0.9 --hotspot-share 0.65 --hotspot-duration 5 \
   --replica-ttl 3 --threshold 1200 --bucket-size-mib 4 \
