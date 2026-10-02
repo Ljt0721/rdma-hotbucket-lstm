@@ -82,8 +82,24 @@ Write the same 4 MiB pattern from the compute client:
 ```
 
 The program uses CM address and route resolution, an RC queue pair, registered memory, a one-sided
-`IBV_WR_RDMA_WRITE`, completion polling, and a final SEND notification. The server checks every byte
-before accepting the run. The client reports write-completion time and throughput.
+`IBV_WR_RDMA_WRITE`, completion polling, and SEND/RECV control messages. The server checks the exact
+length and every payload byte, then returns an ACK or NACK. The client reports success and throughput
+only after receiving the ACK. CM and completion waits have finite timeouts, and an early peer
+disconnect terminates the pending operation instead of leaving the process blocked.
+
+For memory-safety debugging, use a separate sanitizer build on both VMs:
+
+```bash
+cmake -S . -B build-rdma-asan -DHOTBUCKET_ENABLE_RDMA=ON \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+cmake --build build-rdma-asan -j
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+  ./build-rdma-asan/hotbucket_rdma_copy server 7471 4194304
+```
+
+Run the matching sanitizer client on the other VM. Test equal sizes for success and deliberately
+different sizes to confirm that both sides reject a partial or oversized transfer.
 
 ## Relation to the simulator
 

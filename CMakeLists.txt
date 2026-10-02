@@ -32,7 +32,9 @@ if(HOTBUCKET_ENABLE_RDMA)
     add_executable(hotbucket_rdma_copy rdma/rdma_copy.cpp)
     target_include_directories(hotbucket_rdma_copy PRIVATE ${RDMACM_INCLUDE_DIR})
     target_link_libraries(hotbucket_rdma_copy PRIVATE ${RDMACM_LIBRARY} ${IBVERBS_LIBRARY})
-    target_compile_options(hotbucket_rdma_copy PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(
+        hotbucket_rdma_copy PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+    )
 endif()
 
 include(CTest)
