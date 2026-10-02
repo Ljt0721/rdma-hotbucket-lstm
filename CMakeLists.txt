@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(hotbucket_core
     src/cluster.cpp
+    src/entity_memory.cpp
     src/policies.cpp
     src/workload.cpp
 )
@@ -19,6 +20,20 @@ else()
 endif()
 add_executable(hotbucket_sim src/main.cpp)
 target_link_libraries(hotbucket_sim PRIVATE hotbucket_core)
+
+option(HOTBUCKET_ENABLE_RDMA "Build the Linux rdma_cm/libibverbs copy probe" OFF)
+if(HOTBUCKET_ENABLE_RDMA)
+    if(NOT UNIX)
+        message(FATAL_ERROR "HOTBUCKET_ENABLE_RDMA requires Linux or another Unix RDMA stack")
+    endif()
+    find_path(RDMACM_INCLUDE_DIR rdma/rdma_cma.h REQUIRED)
+    find_library(RDMACM_LIBRARY rdmacm REQUIRED)
+    find_library(IBVERBS_LIBRARY ibverbs REQUIRED)
+    add_executable(hotbucket_rdma_copy rdma/rdma_copy.cpp)
+    target_include_directories(hotbucket_rdma_copy PRIVATE ${RDMACM_INCLUDE_DIR})
+    target_link_libraries(hotbucket_rdma_copy PRIVATE ${RDMACM_LIBRARY} ${IBVERBS_LIBRARY})
+    target_compile_options(hotbucket_rdma_copy PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

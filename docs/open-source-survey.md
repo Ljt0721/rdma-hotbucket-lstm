@@ -1,6 +1,6 @@
 # Open-source implementation survey
 
-Survey date: 2026-08-08
+Survey updated: 2026-08-26
 
 The aim of this survey is not to find one repository that already implements the thesis. No
 reviewed project combines low-frequency future hot-bucket prediction, measured copy cost, and
@@ -33,6 +33,9 @@ considered. A paper artifact without a clear reuse licence is studied but not co
 | [brianfrankcooper/YCSB](https://github.com/brianfrankcooper/YCSB) | Standard GET/UPDATE workload mixes, skew controls, and repeatable benchmarking conventions | Java framework is unnecessary for the custom C++ prototype; default traces do not move hotspots | Reproduce the relevant workload rules in our trace generator and add moving hotspots |
 | [valkey-io/valkey](https://github.com/valkey-io/valkey) | Mature KV server with experimental Linux RDMA transport | Very large codebase and different data/replication design | Optional external comparison only, not the thesis base |
 | [pytorch/pytorch](https://github.com/pytorch/pytorch) | Maintained `torch.nn.LSTM`, data loading, training, and model export | A full framework; inference must remain outside the request path | Install as a Python dependency |
+| [malin1993ml/QueryBot5000](https://github.com/malin1993ml/QueryBot5000) | Official QueryBot 5000 artifact; predicts logical SQL arrival rates with forecasting models including an RNN/LSTM path | Query-level relational workload, old dependencies, and no root licence detected | Study its workload-to-sequence design; do not copy code |
+| [pytorch/examples](https://github.com/pytorch/examples/tree/main/time_sequence_prediction) | Official minimal example of recurrent next-step sequence prediction | Synthetic sine-wave task without temporal validation or deployment rules | Keep as an API-level reference only |
+| [Vicen-te/time-series-benchmark](https://github.com/Vicen-te/time-series-benchmark) | Clear PyTorch LSTM example with temporal splits, training-only standardization, clipping, early stopping, and checkpoint metadata | General time-series benchmark rather than a systems workload artifact | Study its experiment hygiene; implement our own bucket model |
 | [unit8co/darts](https://github.com/unit8co/darts) | Ready-made forecasting baselines and common evaluation utilities | Adds abstractions that may hide the actual experiment | Optional fallback for model comparison, not an initial dependency |
 | [Nixtla/neuralforecast](https://github.com/Nixtla/neuralforecast) | Maintained neural forecasting implementations | Designed for broader forecasting workloads and may be excessive here | Optional fallback if direct PyTorch experiments are insufficient |
 | [google/benchmark](https://github.com/google/benchmark) | Reliable C++ microbenchmark harness | Does not measure distributed end-to-end behaviour | Add only when timing local metadata and routing operations |
@@ -50,6 +53,12 @@ The first complete prototype will use a deliberately small stack:
   an added moving-hotspot schedule.
 - **Reference artifacts:** `rdma-basic-tutorial`, `rdma_bench`, and DINOMO. They are references, not
   a combined upstream product.
+
+QueryBot 5000, the official PyTorch example, and the independent time-series benchmark are stored
+as read-only Git submodules. The reviewed commits are `3e74585`, `acc295d`, and `974a950`
+respectively. QueryBot has no detected root licence, while the other two repositories include
+licence files. No source from these projects is copied into `ml/`; they are retained so the design
+choices can be checked later.
 
 FUSEE, XStore, NetCache, Valkey, Darts, and NeuralForecast remain external study material. This
 keeps the code buildable on one computer and prevents the implementation from becoming an attempt
@@ -104,21 +113,20 @@ The policy decides whether that estimate is strong enough to justify a physical 
 
 Each bucket produces one row per observation window. The initial fields are:
 
-```text
-trace_id, window_id, bucket_id, home_node,
-get_count, put_count, read_ratio, request_bytes,
-home_node_load, cluster_max_load, mean_latency_us, p99_latency_us,
-replica_count, future_get_count, future_severe_hotspot
-```
+The trace exporter records identifiers and fixed experiment settings together with `get_count`,
+`put_count`, `read_ratio`, `request_share`, and `home_node_logical_load_ratio`. These are logical
+demand measurements taken before any policy acts. Future labels are deliberately created later by
+the Python dataset builder, so an exported row never contains information from a later window.
 
 The training examples are rolling sequences from the earlier part of a trace. Validation uses the
 next time interval, and the test set uses the final unseen interval. Random row splitting is not
 allowed because neighbouring time windows would leak information.
 
-The initial model will be a small unidirectional LSTM with one layer and 32-64 hidden units. Ten
-recent windows will predict one or two windows ahead. Simulation can generate these windows quickly;
-physical tests will start with 30-second windows, then compare 10, 30, and 60 seconds. These values
-are experimental settings, not assumptions that one interval is always best.
+The initial model is a small unidirectional LSTM with one layer and 32 hidden units. Six recent
+windows predict the next 30-second window, matching the final proposal. One shared model scores all
+buckets; it does not create one model per bucket. Its two outputs are severe-hotspot probability
+and predicted GET share. Later sensitivity tests may compare other observation intervals, but the
+first implementation has one explicit setting instead of silently mixing several definitions.
 
 ## Workload construction
 
@@ -152,12 +160,13 @@ than the measured copy cost plus a safety margin for wrong predictions.
 
 ## Build sequence
 
-1. **Complete the simulator dataset pipeline.** Export clean traces, labels, and same-trace baseline
-   results. Validate that copy cost can make an inaccurate policy slower.
-2. **Train the first LSTM offline.** Add time-ordered train/validation/test splitting, normalization
-   fitted only on training data, model checkpoints, and prediction CSV output.
-3. **Connect prediction to the C++ controller.** Replay unseen traces using frozen predictions and
-   compare no action, reactive copying, recent-window prediction, and cost-aware LSTM.
+1. **Completed: simulator dataset pipeline.** Export clean traces for six controlled hotspot
+   patterns without applying a balancing policy.
+2. **Completed: first offline LSTM.** Use time-ordered train/validation/test splitting,
+   normalization fitted only on training data, early stopping, checkpoints, and prediction CSV.
+3. **Completed: connect prediction to the C++ controller.** Replay unseen traces using frozen
+   predictions and compare no action, reactive copying, recent-window prediction, and cost-aware
+   LSTM. Copy cost and measured low-frequency inference overhead are included.
 4. **Build a multi-process KV prototype.** Separate clients and memory nodes using local or TCP
    transport while retaining the same policy interfaces.
 5. **Add RDMA transport.** Start with two Ubuntu VMs and Soft-RoCE. Replace only the transport with

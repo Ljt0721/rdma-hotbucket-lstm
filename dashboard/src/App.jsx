@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Boxes,
   Clock3,
   Copy,
   Database,
   Flame,
   Gauge,
+  MemoryStick,
   Play,
   Server,
   Square,
@@ -14,8 +16,9 @@ import {
 
 const initialSettings = {
   policy: "recent-window",
-  nodes: 4,
+  nodes: 5,
   buckets: 64,
+  entities: 10,
   windows: 40,
   requests: 4000,
   nodeCapacity: 1800,
@@ -39,6 +42,16 @@ function formatNumber(value, digits = 0) {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   }).format(value);
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return "-";
+  if (value >= 1024) return `${formatNumber(value / 1024, 2)} KiB`;
+  return `${formatNumber(value)} B`;
+}
+
+function allocationKey(entity) {
+  return `${entity.id}:${entity.nodeId}:${entity.isReplica ? "replica" : "primary"}`;
 }
 
 function Metric({ icon: Icon, label, value, detail, tone = "blue" }) {
@@ -154,6 +167,134 @@ function BucketMap({ buckets = [], hotBucket }) {
   );
 }
 
+function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, hotBucket }) {
+  const entities = placement?.nodes?.flatMap((node) => node.entities) || [];
+  const selected = entities.find((entity) => allocationKey(entity) === selectedAllocationKey)
+    || entities.find((entity) => !entity.isReplica)
+    || entities[0];
+
+  return (
+    <section className="panel memory-panel">
+      <div className="section-heading">
+        <div><MemoryStick size={18} /><h2>Entity memory allocation</h2></div>
+        <span>
+          {placement
+            ? `${placement.primaryCount} primary entities · ${placement.replicaCount} temporary copies`
+            : "Loading placement"}
+        </span>
+      </div>
+
+      {placement ? (
+        <>
+          <div className="memory-summary">
+            <div><span>Total pool</span><strong>{formatBytes(placement.totalCapacityBytes)}</strong></div>
+            <div><span>Allocated</span><strong>{formatBytes(placement.totalUsedBytes)}</strong></div>
+            <div><span>Utilization</span><strong>{formatNumber((placement.totalUsedBytes / placement.totalCapacityBytes) * 100, 1)}%</strong></div>
+            <div><span>Temporary copies</span><strong>{formatNumber(placement.replicaCount)}</strong></div>
+          </div>
+
+          <div className="memory-node-grid">
+            {placement.nodes.map((node) => {
+              const utilization = (node.usedBytes / node.capacityBytes) * 100;
+              const primaryCount = node.entities.filter((entity) => !entity.isReplica).length;
+              const replicaCount = node.entities.length - primaryCount;
+              return (
+                <article className="memory-node" key={node.id}>
+                  <header>
+                    <div><Server size={15} /><strong>Node {node.id}</strong></div>
+                    <span>{primaryCount} primary · {replicaCount} copies</span>
+                  </header>
+                  <div className="node-memory-stats">
+                    <span>{formatBytes(node.usedBytes)} used</span>
+                    <span>{formatNumber(utilization, 1)}%</span>
+                  </div>
+                  <div className="memory-addresses"><span>0 B</span><span>{formatBytes(node.capacityBytes)}</span></div>
+                  <div className="memory-pool-track" aria-label={`Node ${node.id} memory layout`}>
+                    {node.entities.map((entity) => {
+                      const left = (entity.offsetBytes / node.capacityBytes) * 100;
+                      const width = (entity.allocatedBytes / node.capacityBytes) * 100;
+                      const isHot = entity.bucketId === hotBucket;
+                      const justCopied = entity.isReplica
+                        && placement.copiedBucket === entity.bucketId
+                        && placement.copiedToNode === entity.nodeId;
+                      return (
+                        <button
+                          key={allocationKey(entity)}
+                          type="button"
+                          className={`memory-segment type-${entity.id % 6} ${entity.isReplica ? "replica" : "primary"} ${isHot ? "hot" : ""} ${justCopied ? "just-copied" : ""}`}
+                          style={{ left: `${left}%`, width: `${width}%` }}
+                          onClick={() => onSelect(allocationKey(entity))}
+                          title={`${entity.callsign} ${entity.isReplica ? "replica" : "primary"}: offset ${entity.offsetBytes} B, allocation ${entity.allocatedBytes} B`}
+                          aria-label={`Select ${entity.callsign}`}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="node-entity-list">
+                    {node.entities.map((entity) => (
+                      <button
+                        key={allocationKey(entity)}
+                        type="button"
+                        className={`${selected && allocationKey(selected) === allocationKey(entity) ? "selected" : ""} ${entity.bucketId === hotBucket ? "hot" : ""} ${entity.isReplica ? "replica" : "primary"}`}
+                        onClick={() => onSelect(allocationKey(entity))}
+                      >
+                        <span className={`entity-color type-${entity.id % 6}`} />
+                        <span className="entity-name">
+                          <strong>{entity.callsign}</strong>
+                          <small>{entity.isReplica ? `Replica · expires after W${entity.expiresAfterWindow + 1}` : entity.entityType}</small>
+                        </span>
+                        <span className="entity-size">{entity.isReplica ? <Copy size={13} /> : null}{formatBytes(entity.allocatedBytes)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          {selected && (
+            <div className="entity-inspector">
+              <div className="entity-inspector-heading">
+                <div className={`entity-avatar type-${selected.id % 6}`}><Boxes size={18} /></div>
+                <div>
+                  <strong>{selected.callsign}</strong>
+                  <span>{selected.entityType} · EntityID {selected.id} · {selected.isReplica ? "Temporary replica" : "Primary copy"}</span>
+                </div>
+              </div>
+              <dl className="entity-mapping">
+                <div><dt>KV key</dt><dd>{selected.id}</dd></div>
+                <div><dt>Bucket</dt><dd>#{selected.bucketId}</dd></div>
+                <div><dt>Memory node</dt><dd>Node {selected.nodeId}</dd></div>
+                <div><dt>Home node</dt><dd>Node {selected.homeNode}</dd></div>
+                <div><dt>Offset</dt><dd>{formatBytes(selected.offsetBytes)}</dd></div>
+                <div><dt>Serialized</dt><dd>{formatBytes(selected.serializedBytes)}</dd></div>
+                <div><dt>Allocated</dt><dd>{formatBytes(selected.allocatedBytes)}</dd></div>
+              </dl>
+              <div className="attribute-table-wrap">
+                <table className="attribute-table">
+                  <thead><tr><th>Attribute key</th><th>Type</th><th>Value</th><th>Size</th></tr></thead>
+                  <tbody>
+                    {selected.attributes.map((attribute) => (
+                      <tr key={attribute.name}>
+                        <td>{attribute.name}</td>
+                        <td>{attribute.valueType}</td>
+                        <td title={attribute.value}>{attribute.value}</td>
+                        <td>{formatBytes(attribute.valueBytes)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="empty-state memory-empty">Waiting for the C++ memory placement snapshot</div>
+      )}
+    </section>
+  );
+}
+
 function NumberField({ label, name, value, min, max, step = 1, onChange, disabled }) {
   return (
     <label className="field">
@@ -177,12 +318,35 @@ export default function App() {
   const [status, setStatus] = useState("idle");
   const [history, setHistory] = useState([]);
   const [latest, setLatest] = useState(null);
+  const [placement, setPlacement] = useState(null);
+  const [selectedAllocationKey, setSelectedAllocationKey] = useState(null);
   const [message, setMessage] = useState("Ready");
   const [debugLogs, setDebugLogs] = useState([]);
   const [logEndpoint, setLogEndpoint] = useState("/api/logs");
   const sourceRef = useRef(null);
 
-  useEffect(() => () => sourceRef.current?.close(), []);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/placement?nodes=${initialSettings.nodes}&buckets=${initialSettings.buckets}&entities=${initialSettings.entities}`, {
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Placement request failed (${response.status})`);
+        return response.json();
+      })
+      .then((payload) => {
+        setPlacement(payload);
+        const first = payload.nodes?.flatMap((node) => node.entities)?.[0];
+        setSelectedAllocationKey(first ? allocationKey(first) : null);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") appendDebug("ERROR", error.message);
+      });
+    return () => {
+      controller.abort();
+      sourceRef.current?.close();
+    };
+  }, []);
 
   const hotBucket = latest?.buckets?.find((bucket) => bucket.id === latest.hotBucket);
   const progress = latest ? ((latest.windowId + 1) / latest.windowCount) * 100 : 0;
@@ -235,18 +399,44 @@ export default function App() {
       if (payload.type === "started") {
         setLogEndpoint(payload.logEndpoint || "/api/logs");
         appendDebug("INFO", `Run ${payload.runId} started with child simulator`);
-        appendDebug("INFO", `${payload.policy}, ${payload.nodes} nodes, ${payload.buckets} buckets`);
-        setMessage(`${policyLabels[payload.policy]} · ${payload.nodes} nodes · ${payload.buckets} buckets`);
+        appendDebug("INFO", `${payload.policy}, ${payload.nodes} nodes, ${payload.entities} entities`);
+        setMessage(`${policyLabels[payload.policy]} · ${payload.nodes} nodes · ${payload.entities} entities`);
+      } else if (payload.type === "placement") {
+        setPlacement(payload);
+        const allocated = payload.nodes?.flatMap((node) => node.entities) || [];
+        setSelectedAllocationKey((current) => (
+          allocated.some((entity) => allocationKey(entity) === current)
+            ? current
+            : allocated[0] ? allocationKey(allocated[0]) : null
+        ));
+        appendDebug(
+          "INFO",
+          `Allocated ${payload.entityCount} entities across ${payload.nodeCount} memory nodes (${formatBytes(payload.totalUsedBytes)})`,
+        );
       } else if (payload.type === "window") {
         setLatest(payload);
         setHistory((current) => [...current, payload]);
+        const copiedBucket = payload.decision?.bucketId;
+        const copyMatchedHotspot = copiedBucket === payload.hotBucket;
         appendDebug(
-          payload.copyApplied ? "INFO" : "DEBUG",
-          payload.copyApplied
-            ? `W${payload.windowId + 1}: copied bucket ${payload.decision?.bucketId} to node ${payload.decision?.targetNode}`
-            : `W${payload.windowId + 1}: hot bucket ${payload.hotBucket}, load ${formatNumber(payload.maxLoadRatio * 100, 1)}%`,
+          payload.copyApplied ? (copyMatchedHotspot ? "INFO" : "WARN") : "DEBUG",
+          `W${payload.windowId + 1}: hot bucket ${payload.hotBucket}, load ${formatNumber(payload.maxLoadRatio * 100, 1)}%${payload.copyApplied ? `; copied bucket ${copiedBucket} to node ${payload.decision?.targetNode}${copyMatchedHotspot ? "" : " (stale prediction)"}` : ""}`,
         );
         setMessage(`Window ${payload.windowId + 1} of ${payload.windowCount}`);
+      } else if (payload.type === "memory") {
+        setPlacement(payload);
+        const allocated = payload.nodes?.flatMap((node) => node.entities) || [];
+        setSelectedAllocationKey((current) => {
+          if (allocated.some((entity) => allocationKey(entity) === current)) return current;
+          const firstPrimary = allocated.find((entity) => !entity.isReplica);
+          return firstPrimary ? allocationKey(firstPrimary) : null;
+        });
+        if (payload.expiredReplicas?.length) {
+          const locations = payload.expiredReplicas
+            .map((replica) => `bucket ${replica.bucketId} on node ${replica.nodeId}`)
+            .join(", ");
+          appendDebug("DEBUG", `W${payload.windowId + 1}: expired ${locations}`);
+        }
       } else if (payload.type === "complete") {
         appendDebug("INFO", `Completed with ${payload.copies ?? 0} copies in ${formatNumber(payload.totalCompletionMs, 2)} ms`);
         setStatus("complete");
@@ -317,6 +507,7 @@ export default function App() {
           <div className="field-grid">
             <NumberField label="Nodes" name="nodes" value={settings.nodes} min={2} max={16} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Buckets" name="buckets" value={settings.buckets} min={8} max={512} onChange={changeSetting} disabled={status === "running"} />
+            <NumberField label="Entities" name="entities" value={settings.entities} min={2} max={100} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Windows" name="windows" value={settings.windows} min={5} max={200} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Requests / window" name="requests" value={settings.requests} min={100} max={1000000} step={100} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Node capacity" name="nodeCapacity" value={settings.nodeCapacity} min={100} max={1000000} step={100} onChange={changeSetting} disabled={status === "running"} />
@@ -363,6 +554,13 @@ export default function App() {
             <Metric icon={Activity} label="Simulated throughput" value={latest ? `${formatNumber(throughput / 1000, 1)}K` : "-"} detail="logical ops / second" tone="blue" />
             <Metric icon={Copy} label="Copies applied" value={latest ? formatNumber(latest.copies) : "-"} detail={latest ? `${formatNumber(latest.copyCostMs, 2)} ms current cost` : "No decisions"} tone="amber" />
           </section>
+
+          <EntityMemoryAllocation
+            placement={placement}
+            selectedAllocationKey={selectedAllocationKey}
+            onSelect={setSelectedAllocationKey}
+            hotBucket={latest?.hotBucket}
+          />
 
           <div className="dashboard-grid">
             <section className="panel node-panel">

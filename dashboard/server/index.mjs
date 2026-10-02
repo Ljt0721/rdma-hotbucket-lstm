@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -89,7 +89,69 @@ function decimalParam(params, name, fallback, minimum, maximum) {
 }
 
 function sendEvent(response, payload) {
-  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function placementSettings(url) {
+  return {
+    nodes: integerParam(url.searchParams, "nodes", 5, 2, 16),
+    buckets: integerParam(url.searchParams, "buckets", 64, 8, 512),
+    entities: integerParam(url.searchParams, "entities", 10, 2, 100),
+  };
+}
+
+function nodeMemoryBytes(nodes, entities) {
+  return Math.max(2048, Math.ceil(entities / nodes) * 1024);
+}
+
+function getPlacement(response, url) {
+  const executable = simulatorPath();
+  if (!executable) {
+    response.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ error: "Simulator executable was not found." }));
+    return;
+  }
+
+  const { nodes, buckets, entities } = placementSettings(url);
+  const memoryBytes = nodeMemoryBytes(nodes, entities);
+  const args = [
+    "--nodes", String(nodes),
+    "--buckets", String(buckets),
+    "--entities", String(entities),
+    "--node-memory-bytes", String(memoryBytes),
+    "--stream-json",
+    "--placement-only",
+  ];
+  execFile(executable, args, {
+    cwd: projectRoot,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  }, (error, stdout, stderr) => {
+    if (error) {
+      writeLog("ERROR", "placement_failed", {
+        nodes,
+        buckets,
+        entities,
+        message: stderr.trim() || error.message,
+      });
+      response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: stderr.trim() || error.message }));
+      return;
+    }
+    try {
+      const placement = stdout.split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .find((payload) => payload.type === "placement");
+      if (!placement) throw new Error("Simulator returned no placement snapshot.");
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(placement));
+    } catch (parseError) {
+      writeLog("ERROR", "placement_parse_failed", { message: parseError.message });
+      response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: parseError.message }));
+    }
+  });
 }
 
 function startSimulation(request, response, url) {
@@ -117,8 +179,10 @@ function startSimulation(request, response, url) {
   const allowedPolicies = new Set(["no-action", "reactive", "recent-window"]);
   const requestedPolicy = params.get("policy") || "recent-window";
   const policy = allowedPolicies.has(requestedPolicy) ? requestedPolicy : "recent-window";
-  const nodes = integerParam(params, "nodes", 4, 2, 16);
+  const nodes = integerParam(params, "nodes", 5, 2, 16);
   const buckets = integerParam(params, "buckets", 64, 8, 512);
+  const entities = integerParam(params, "entities", 10, 2, 100);
+  const memoryBytes = nodeMemoryBytes(nodes, entities);
   const windows = integerParam(params, "windows", 40, 5, 200);
   const requests = integerParam(params, "requests", 4000, 100, 1000000);
   const nodeCapacity = integerParam(params, "nodeCapacity", 1800, 100, 1000000);
@@ -141,6 +205,8 @@ function startSimulation(request, response, url) {
     "--policy", policy,
     "--nodes", String(nodes),
     "--buckets", String(buckets),
+    "--entities", String(entities),
+    "--node-memory-bytes", String(memoryBytes),
     "--windows", String(windows),
     "--requests", String(requests),
     "--node-capacity", String(nodeCapacity),
@@ -168,6 +234,7 @@ function startSimulation(request, response, url) {
     childPid: child.pid,
     policy,
     nodes,
+    entities,
     buckets,
     windows,
     requestsPerWindow: requests,
@@ -182,6 +249,7 @@ function startSimulation(request, response, url) {
     policy,
     nodes,
     buckets,
+    entities,
     windows,
     output: relativeOutputPath,
     logEndpoint: `/api/logs?runId=${encodeURIComponent(runId)}`,
@@ -197,8 +265,20 @@ function startSimulation(request, response, url) {
       try {
         const payload = JSON.parse(line);
         if (payload.type === "complete") completed = true;
-        if (payload.type === "window") {
-          writeLog(payload.copyApplied ? "INFO" : "DEBUG", "window_completed", {
+        if (payload.type === "placement") {
+          writeLog("INFO", "entities_allocated", {
+            runId,
+            nodeCount: payload.nodeCount,
+            entityCount: payload.entityCount,
+            usedBytes: payload.totalUsedBytes,
+            capacityBytes: payload.totalCapacityBytes,
+          });
+        } else if (payload.type === "window") {
+          const copyMatchedHotspot = payload.decision?.bucketId === payload.hotBucket;
+          writeLog(
+            payload.copyApplied ? (copyMatchedHotspot ? "INFO" : "WARN") : "DEBUG",
+            "window_completed",
+            {
             runId,
             windowId: payload.windowId,
             hotBucket: payload.hotBucket,
@@ -207,6 +287,7 @@ function startSimulation(request, response, url) {
             copyApplied: payload.copyApplied,
             copyBucket: payload.decision?.bucketId ?? null,
             copyTargetNode: payload.decision?.targetNode ?? null,
+            copyMatchedHotspot: payload.copyApplied ? copyMatchedHotspot : null,
           });
         } else if (payload.type === "complete") {
           writeLog("INFO", "simulation_completed", {
@@ -312,6 +393,10 @@ const server = createServer((request, response) => {
       runId,
       entries: readRecentLogs(limit, runId),
     }));
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/placement") {
+    getPlacement(response, url);
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/simulate") {

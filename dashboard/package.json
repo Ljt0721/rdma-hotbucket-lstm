@@ -8,6 +8,7 @@
     "server": "node server/index.mjs",
     "vite": "vite --host 127.0.0.1",
     "build": "vite build",
+    "verify:live": "node scripts/verify-live.mjs",
     "start": "node server/index.mjs"
   },
   "dependencies": {

@@ -1,0 +1,107 @@
+{
+  "selection_data": "validation windows only",
+  "evaluation_start_fraction": 0.7,
+  "evaluation_end_fraction": 0.85,
+  "best": {
+    "minimum_probability": 0.5,
+    "minimum_predicted_get_ratio": 0.0,
+    "mean_completion_ms": 14697.533395833334,
+    "mean_improvement_vs_no_action_pct": 69.95329353549995,
+    "mean_improvement_vs_recent_pct": 2.0487830401001426,
+    "mean_copies": 8.833333333333334,
+    "wins_vs_recent": 16,
+    "traces": 48
+  },
+  "trials": [
+    {
+      "minimum_probability": 0.5,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 14697.533395833334,
+      "mean_improvement_vs_no_action_pct": 69.95329353549995,
+      "mean_improvement_vs_recent_pct": 2.0487830401001426,
+      "mean_copies": 8.833333333333334,
+      "wins_vs_recent": 16,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.6,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 14764.2905625,
+      "mean_improvement_vs_no_action_pct": 69.85487188594625,
+      "mean_improvement_vs_recent_pct": 1.7472096067628027,
+      "mean_copies": 8.5625,
+      "wins_vs_recent": 14,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.7,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 14828.364145833335,
+      "mean_improvement_vs_no_action_pct": 69.77998438053602,
+      "mean_improvement_vs_recent_pct": 1.5412403943594828,
+      "mean_copies": 8.333333333333334,
+      "wins_vs_recent": 12,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.5,
+      "minimum_predicted_get_ratio": 0.85,
+      "mean_completion_ms": 15112.083395833333,
+      "mean_improvement_vs_no_action_pct": 68.75309049165699,
+      "mean_improvement_vs_recent_pct": -3.7153282134038235,
+      "mean_copies": 7.9375,
+      "wins_vs_recent": 5,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.6,
+      "minimum_predicted_get_ratio": 0.85,
+      "mean_completion_ms": 15112.083395833333,
+      "mean_improvement_vs_no_action_pct": 68.75309049165699,
+      "mean_improvement_vs_recent_pct": -3.7153282134038235,
+      "mean_copies": 7.9375,
+      "wins_vs_recent": 5,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.7,
+      "minimum_predicted_get_ratio": 0.85,
+      "mean_completion_ms": 15112.083395833333,
+      "mean_improvement_vs_no_action_pct": 68.75309049165699,
+      "mean_improvement_vs_recent_pct": -3.7153282134038235,
+      "mean_copies": 7.9375,
+      "wins_vs_recent": 5,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.5,
+      "minimum_predicted_get_ratio": 1.0,
+      "mean_completion_ms": 15356.355583333332,
+      "mean_improvement_vs_no_action_pct": 67.92327704212967,
+      "mean_improvement_vs_recent_pct": -6.56892873962849,
+      "mean_copies": 7.833333333333333,
+      "wins_vs_recent": 6,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.6,
+      "minimum_predicted_get_ratio": 1.0,
+      "mean_completion_ms": 15356.355583333332,
+      "mean_improvement_vs_no_action_pct": 67.92327704212967,
+      "mean_improvement_vs_recent_pct": -6.56892873962849,
+      "mean_copies": 7.833333333333333,
+      "wins_vs_recent": 6,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.7,
+      "minimum_predicted_get_ratio": 1.0,
+      "mean_completion_ms": 15356.355583333332,
+      "mean_improvement_vs_no_action_pct": 67.92327704212967,
+      "mean_improvement_vs_recent_pct": -6.56892873962849,
+      "mean_copies": 7.833333333333333,
+      "wins_vs_recent": 6,
+      "traces": 48
+    }
+  ]
+}

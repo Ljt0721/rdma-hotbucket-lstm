@@ -23,6 +23,7 @@ $commonArguments = @(
     "-static-libstdc++",
     "-I$($repoRoot)\include",
     "$($repoRoot)\src\cluster.cpp",
+    "$($repoRoot)\src\entity_memory.cpp",
     "$($repoRoot)\src\policies.cpp",
     "$($repoRoot)\src\workload.cpp"
 )

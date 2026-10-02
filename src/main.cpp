@@ -1,4 +1,5 @@
 #include "hotbucket/cluster.hpp"
+#include "hotbucket/entity_memory.hpp"
 #include "hotbucket/policies.hpp"
 #include "hotbucket/workload.hpp"
 
@@ -21,7 +22,17 @@ struct CommandLine {
     std::string output{"results/run.csv"};
     std::size_t severe_get_threshold{1200};
     std::size_t window_delay_ms{0};
+    std::size_t node_memory_bytes{2048};
+    std::size_t observation_window_seconds{30};
+    std::size_t evaluation_start_window{0};
+    std::string trace_id{"trace-0"};
+    std::string prediction_file;
+    double lstm_minimum_probability{0.70};
+    double lstm_minimum_predicted_get_ratio{1.0};
+    double lstm_inference_cost_ms{0.0};
     bool stream_json{false};
+    bool placement_only{false};
+    bool trace_only{false};
 };
 
 std::string RequireValue(int& index, int argc, char** argv) {
@@ -43,6 +54,8 @@ CommandLine ParseArguments(int argc, char** argv) {
             command.config.node_count = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--buckets") {
             command.config.bucket_count = std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--entities") {
+            command.config.entity_count = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--windows") {
             command.config.window_count = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--requests") {
@@ -53,6 +66,8 @@ CommandLine ParseArguments(int argc, char** argv) {
         } else if (argument == "--hotspot-duration") {
             command.config.hotspot_duration_windows =
                 std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--workload-pattern") {
+            command.config.workload_pattern = RequireValue(index, argc, argv);
         } else if (argument == "--replica-ttl") {
             command.config.replica_ttl_windows =
                 std::stoull(RequireValue(index, argc, argv));
@@ -75,18 +90,48 @@ CommandLine ParseArguments(int argc, char** argv) {
             command.config.seed = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--window-delay-ms") {
             command.window_delay_ms = std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--node-memory-bytes") {
+            command.node_memory_bytes = std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--window-seconds") {
+            command.observation_window_seconds =
+                std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--trace-id") {
+            command.trace_id = RequireValue(index, argc, argv);
+        } else if (argument == "--prediction-file") {
+            command.prediction_file = RequireValue(index, argc, argv);
+        } else if (argument == "--lstm-min-probability") {
+            command.lstm_minimum_probability = std::stod(RequireValue(index, argc, argv));
+        } else if (argument == "--lstm-min-predicted-get-ratio") {
+            command.lstm_minimum_predicted_get_ratio =
+                std::stod(RequireValue(index, argc, argv));
+        } else if (argument == "--lstm-inference-cost-ms") {
+            command.lstm_inference_cost_ms = std::stod(RequireValue(index, argc, argv));
+        } else if (argument == "--evaluation-start-window") {
+            command.evaluation_start_window =
+                std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--stream-json") {
             command.stream_json = true;
+        } else if (argument == "--placement-only") {
+            command.placement_only = true;
+        } else if (argument == "--trace-only") {
+            command.trace_only = true;
         } else if (argument == "--help") {
             std::cout
                 << "Usage: hotbucket_sim [options]\n"
-                << "  --policy no-action|reactive|recent-window\n"
-                << "  --nodes N --buckets N --windows N --requests N --node-capacity N\n"
+                << "  --policy no-action|reactive|recent-window|lstm\n"
+                << "  --nodes N --buckets N --entities N --windows N --requests N\n"
+                << "  --node-capacity N --node-memory-bytes N\n"
                 << "  --hotspot-duration N --replica-ttl N --threshold N --seed N\n"
+                << "  --workload-pattern step|ramp|gradual|burst|random|stable\n"
                 << "  --read-ratio R --hotspot-share R --base-latency-us R\n"
                 << "  --bucket-size-mib R --copy-bandwidth-mib-per-ms R\n"
                 << "  --metadata-cost-ms R\n"
-                << "  --stream-json --window-delay-ms N\n"
+                << "  --stream-json --placement-only --trace-only --trace-id ID\n"
+                << "  --prediction-file path.csv --lstm-min-probability R\n"
+                << "  --lstm-min-predicted-get-ratio R\n"
+                << "  --lstm-inference-cost-ms R\n"
+                << "  --evaluation-start-window N\n"
+                << "  --window-seconds N --window-delay-ms N\n"
                 << "  --output path/to/result.csv\n";
             std::exit(0);
         } else {
@@ -96,11 +141,94 @@ CommandLine ParseArguments(int argc, char** argv) {
     return command;
 }
 
+void WriteTrainingTrace(const CommandLine& command,
+                        const std::vector<hotbucket::BattlefieldEntity>& entities,
+                        const hotbucket::EntityMemoryCluster& memory_cluster) {
+    if (command.observation_window_seconds == 0) {
+        throw std::invalid_argument("window_seconds must be positive");
+    }
+
+    const std::filesystem::path output_path(command.output);
+    if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path());
+    }
+    std::ofstream output(output_path);
+    if (!output) {
+        throw std::runtime_error("cannot open trace output file: " + command.output);
+    }
+    output << std::fixed << std::setprecision(6);
+    output << "trace_id,pattern,seed,window_id,window_seconds,bucket_id,home_node,"
+              "bucket_bytes,requests_per_window,node_capacity,hotspot_duration,"
+              "severe_get_threshold,configured_read_ratio,configured_hotspot_share,"
+              "get_count,put_count,"
+              "read_ratio,request_share,home_node_logical_ops,"
+              "home_node_logical_load_ratio,generated_hot_bucket\n";
+
+    std::vector<bool> active_buckets(command.config.bucket_count, false);
+    for (const auto& entity : entities) {
+        active_buckets[entity.entity_id % command.config.bucket_count] = true;
+    }
+
+    hotbucket::MovingHotspotWorkload workload(command.config);
+    for (std::size_t window = 0; window < command.config.window_count; ++window) {
+        const auto requests = workload.GenerateWindow(window);
+        const auto generated_hot_bucket = workload.HotBucketForWindow(window);
+        std::vector<std::size_t> gets(command.config.bucket_count, 0);
+        std::vector<std::size_t> puts(command.config.bucket_count, 0);
+        std::vector<std::size_t> node_operations(command.config.node_count, 0);
+        for (const auto& request : requests) {
+            if (request.operation == hotbucket::Operation::Get) {
+                ++gets[request.bucket_id];
+            } else {
+                ++puts[request.bucket_id];
+            }
+            ++node_operations[request.bucket_id % command.config.node_count];
+        }
+
+        for (std::size_t bucket = 0; bucket < command.config.bucket_count; ++bucket) {
+            if (!active_buckets[bucket]) {
+                continue;
+            }
+            const auto logical_requests = gets[bucket] + puts[bucket];
+            const auto home_node = bucket % command.config.node_count;
+            const double read_ratio = logical_requests == 0
+                                          ? 0.0
+                                          : static_cast<double>(gets[bucket]) /
+                                                static_cast<double>(logical_requests);
+            const double request_share = static_cast<double>(logical_requests) /
+                                         static_cast<double>(command.config.requests_per_window);
+            const double home_load = static_cast<double>(node_operations[home_node]) /
+                                     static_cast<double>(
+                                         command.config.node_capacity_per_window);
+            output << command.trace_id << ',' << command.config.workload_pattern << ','
+                   << command.config.seed << ',' << window << ','
+                   << command.observation_window_seconds << ',' << bucket << ','
+                   << home_node << ',' << memory_cluster.PrimaryBytesInBucket(bucket) << ','
+                   << command.config.requests_per_window << ','
+                   << command.config.node_capacity_per_window << ','
+                   << command.config.hotspot_duration_windows << ','
+                   << command.severe_get_threshold << ',' << command.config.read_ratio << ','
+                   << command.config.hotspot_share << ','
+                   << gets[bucket] << ',' << puts[bucket] << ',' << read_ratio << ','
+                   << request_share << ',' << node_operations[home_node] << ',' << home_load
+                   << ',' << generated_hot_bucket << '\n';
+        }
+    }
+
+    std::cout << "trace_id=" << command.trace_id << '\n'
+              << "pattern=" << command.config.workload_pattern << '\n'
+              << "windows=" << command.config.window_count << '\n'
+              << "entities=" << command.config.entity_count << '\n'
+              << "csv=" << output_path.string() << '\n';
+}
+
 void WriteHeader(std::ofstream& output) {
     output << "policy,window_id,bucket_id,home_node,is_generated_hot_bucket,get_count,put_count,"
               "read_ratio,replica_count,mean_latency_us,p99_latency_us,home_node_load_ratio,"
               "cluster_max_load_ratio,window_completion_ms,copy_applied,copy_cost_ms,"
-              "decision_bucket,predicted_gets,expected_benefit_ms,expected_cost_ms\n";
+              "control_overhead_ms,"
+              "decision_bucket,predicted_gets,hotspot_probability,"
+              "expected_benefit_ms,expected_cost_ms\n";
 }
 
 void WriteWindow(std::ofstream& output,
@@ -121,14 +249,16 @@ void WriteWindow(std::ofstream& output,
                << bucket.p99_latency_us << ',' << bucket.home_node_load_ratio << ','
                << result.cluster_max_load_ratio << ',' << result.window_completion_ms << ','
                << (decision_for_bucket && result.copy_applied ? 1 : 0) << ','
-               << (decision_for_bucket ? result.copy_cost_ms : 0.0) << ',';
+               << (decision_for_bucket ? result.copy_cost_ms : 0.0) << ','
+               << result.control_overhead_ms << ',';
 
         if (decision_for_bucket) {
             output << result.decision->bucket_id << ',' << result.decision->predicted_gets << ','
+                   << result.decision->hotspot_probability << ','
                    << result.decision->expected_benefit_ms << ','
                    << result.decision->expected_cost_ms;
         } else {
-            output << ",,,";
+            output << ",,,,";
         }
         output << '\n';
     }
@@ -161,6 +291,97 @@ std::string JsonEscape(const std::string& value) {
     return escaped.str();
 }
 
+void StreamPlacementJson(
+    const hotbucket::MemoryPlacementSnapshot& placement,
+    const std::string& event_type = "placement",
+    const std::optional<std::size_t>& window_id = std::nullopt,
+    const std::optional<hotbucket::ReplicationDecision>& copied = std::nullopt,
+    const std::vector<hotbucket::ReplicaLocation>& expired = {}) {
+    std::cout << "{\"type\":\"" << JsonEscape(event_type) << "\"";
+    if (window_id.has_value()) {
+        std::cout << ",\"windowId\":" << *window_id;
+    }
+    std::cout << ",\"copiedBucket\":";
+    if (copied.has_value()) {
+        std::cout << copied->bucket_id << ",\"copiedToNode\":" << copied->target_node;
+    } else {
+        std::cout << "null,\"copiedToNode\":null";
+    }
+    std::cout << ",\"expiredReplicas\":[";
+    for (std::size_t index = 0; index < expired.size(); ++index) {
+        if (index > 0) {
+            std::cout << ',';
+        }
+        std::cout << "{\"bucketId\":" << expired[index].bucket_id
+                  << ",\"nodeId\":" << expired[index].node_id << '}';
+    }
+    std::cout << "],\"alignmentBytes\":"
+              << placement.alignment_bytes
+              << ",\"bucketCount\":" << placement.bucket_count
+              << ",\"nodeCount\":" << placement.nodes.size()
+              << ",\"totalCapacityBytes\":" << placement.total_capacity_bytes
+              << ",\"totalUsedBytes\":" << placement.total_used_bytes
+              << ",\"nodes\":[";
+
+    std::size_t primary_count = 0;
+    std::size_t replica_count = 0;
+    for (std::size_t node_index = 0; node_index < placement.nodes.size(); ++node_index) {
+        if (node_index > 0) {
+            std::cout << ',';
+        }
+        const auto& node = placement.nodes[node_index];
+        std::cout << "{\"id\":" << node.node_id
+                  << ",\"capacityBytes\":" << node.capacity_bytes
+                  << ",\"usedBytes\":" << node.used_bytes
+                  << ",\"entities\":[";
+        for (std::size_t entity_index = 0; entity_index < node.entities.size(); ++entity_index) {
+            if (entity_index > 0) {
+                std::cout << ',';
+            }
+            const auto& allocation = node.entities[entity_index];
+            if (allocation.is_replica) {
+                ++replica_count;
+            } else {
+                ++primary_count;
+            }
+            std::cout << "{\"id\":" << allocation.entity.entity_id
+                      << ",\"callsign\":\"" << JsonEscape(allocation.entity.callsign)
+                      << "\",\"entityType\":\"" << JsonEscape(allocation.entity.entity_type)
+                      << "\",\"bucketId\":" << allocation.bucket_id
+                      << ",\"homeNode\":" << allocation.home_node
+                      << ",\"nodeId\":" << allocation.node_id
+                      << ",\"offsetBytes\":" << allocation.offset_bytes
+                      << ",\"serializedBytes\":" << allocation.serialized_bytes
+                      << ",\"allocatedBytes\":" << allocation.allocated_bytes
+                      << ",\"isReplica\":" << (allocation.is_replica ? "true" : "false")
+                      << ",\"expiresAfterWindow\":";
+            if (allocation.is_replica) {
+                std::cout << allocation.expires_after_window;
+            } else {
+                std::cout << "null";
+            }
+            std::cout
+                      << ",\"attributes\":[";
+            for (std::size_t attribute_index = 0;
+                 attribute_index < allocation.entity.attributes.size(); ++attribute_index) {
+                if (attribute_index > 0) {
+                    std::cout << ',';
+                }
+                const auto& attribute = allocation.entity.attributes[attribute_index];
+                std::cout << "{\"name\":\"" << JsonEscape(attribute.name)
+                          << "\",\"valueType\":\"" << JsonEscape(attribute.value_type)
+                          << "\",\"value\":\"" << JsonEscape(attribute.value)
+                          << "\",\"valueBytes\":" << attribute.value.size() << '}';
+            }
+            std::cout << "]}";
+        }
+        std::cout << "]}";
+    }
+    std::cout << "],\"entityCount\":" << primary_count
+              << ",\"primaryCount\":" << primary_count
+              << ",\"replicaCount\":" << replica_count << "}" << std::endl;
+}
+
 void StreamWindowJson(const std::string& policy,
                       const hotbucket::SimulationConfig& config,
                       const hotbucket::WindowResult& result,
@@ -176,6 +397,7 @@ void StreamWindowJson(const std::string& policy,
               << ",\"totalCompletionMs\":" << total_completion_ms
               << ",\"copyApplied\":" << (result.copy_applied ? "true" : "false")
               << ",\"copyCostMs\":" << result.copy_cost_ms
+              << ",\"controlOverheadMs\":" << result.control_overhead_ms
               << ",\"copies\":" << copies << ",\"decision\":";
 
     if (result.decision.has_value()) {
@@ -183,6 +405,7 @@ void StreamWindowJson(const std::string& policy,
         std::cout << "{\"bucketId\":" << decision.bucket_id
                   << ",\"targetNode\":" << decision.target_node
                   << ",\"predictedGets\":" << decision.predicted_gets
+                  << ",\"hotspotProbability\":" << decision.hotspot_probability
                   << ",\"expectedBenefitMs\":" << decision.expected_benefit_ms
                   << ",\"expectedCostMs\":" << decision.expected_cost_ms
                   << ",\"reason\":\"" << JsonEscape(decision.reason) << "\"}";
@@ -240,9 +463,56 @@ void StreamCompleteJson(const std::string& policy,
 int main(int argc, char** argv) {
     try {
         const auto command = ParseArguments(argc, argv);
-        auto policy = hotbucket::MakePolicy(command.policy, command.severe_get_threshold);
+        const auto entities = hotbucket::MakeBattlefieldScenario(command.config.entity_count);
+        hotbucket::EntityMemoryCluster memory_cluster(
+            command.config.node_count,
+            command.config.bucket_count,
+            command.node_memory_bytes);
+        const auto placement = memory_cluster.Allocate(entities);
+        if (command.stream_json) {
+            StreamPlacementJson(placement);
+        }
+        if (command.trace_only) {
+            WriteTrainingTrace(command, entities, memory_cluster);
+            return 0;
+        }
+        if (command.placement_only) {
+            if (!command.stream_json) {
+                std::cout << "entities=" << command.config.entity_count << '\n'
+                          << "nodes=" << command.config.node_count << '\n'
+                          << "used_bytes=" << placement.total_used_bytes << '\n';
+            }
+            return 0;
+        }
+
+        if (command.evaluation_start_window >= command.config.window_count) {
+            throw std::invalid_argument(
+                "evaluation_start_window must be smaller than window_count");
+        }
+        if (command.lstm_inference_cost_ms < 0.0) {
+            throw std::invalid_argument("lstm_inference_cost_ms cannot be negative");
+        }
+        std::vector<hotbucket::LstmBucketPrediction> lstm_predictions;
+        if (command.policy == "lstm") {
+            if (command.prediction_file.empty()) {
+                throw std::invalid_argument("lstm policy requires --prediction-file");
+            }
+            lstm_predictions = hotbucket::LoadLstmPredictionsCsv(
+                command.prediction_file, command.trace_id);
+        }
+        auto policy = hotbucket::MakePolicy(
+            command.policy,
+            command.severe_get_threshold,
+            std::move(lstm_predictions),
+            command.lstm_minimum_probability,
+            command.lstm_minimum_predicted_get_ratio);
         hotbucket::MovingHotspotWorkload workload(command.config);
         hotbucket::ClusterSimulator cluster(command.config);
+        std::vector<std::size_t> bucket_bytes(command.config.bucket_count, 0);
+        for (std::size_t bucket = 0; bucket < command.config.bucket_count; ++bucket) {
+            bucket_bytes[bucket] = memory_cluster.PrimaryBytesInBucket(bucket);
+        }
+        cluster.SetBucketBytes(std::move(bucket_bytes));
         std::vector<hotbucket::WindowResult> history;
         history.reserve(command.config.window_count);
 
@@ -262,41 +532,72 @@ int main(int argc, char** argv) {
         double max_load_ratio = 0.0;
 
         for (std::size_t window = 0; window < command.config.window_count; ++window) {
-            cluster.BeginWindow(window);
-            const auto decision = policy->Decide(window, history, cluster);
+            const auto expired_replicas = cluster.BeginWindow(window);
+            memory_cluster.ExpireReplicas(window);
+            std::optional<hotbucket::ReplicationDecision> decision;
+            if (window >= command.evaluation_start_window) {
+                decision = policy->Decide(window, history, cluster);
+            }
             double copy_cost_ms = 0.0;
             bool copy_applied = false;
             if (decision.has_value()) {
-                copy_applied = cluster.ApplyReplication(*decision, window, &copy_cost_ms);
+                const auto expires_after = window + command.config.replica_ttl_windows;
+                if (memory_cluster.ReplicateBucket(
+                        decision->bucket_id, decision->target_node, expires_after)) {
+                    copy_applied = cluster.ApplyReplication(*decision, window, &copy_cost_ms);
+                    if (!copy_applied) {
+                        throw std::logic_error(
+                            "memory copy succeeded but routing replica was rejected");
+                    }
+                }
             }
 
             const auto hot_bucket = workload.HotBucketForWindow(window);
             const auto requests = workload.GenerateWindow(window);
-            auto result = cluster.ProcessWindow(window, hot_bucket, requests, copy_cost_ms);
+            const double control_overhead_ms =
+                command.policy == "lstm" && window >= command.evaluation_start_window
+                    ? command.lstm_inference_cost_ms
+                    : 0.0;
+            auto result = cluster.ProcessWindow(
+                window, hot_bucket, requests, copy_cost_ms, control_overhead_ms);
             result.decision = decision;
             result.copy_applied = copy_applied;
-            WriteWindow(output, policy->Name(), result);
+            if (window >= command.evaluation_start_window) {
+                WriteWindow(output, policy->Name(), result);
 
-            total_completion_ms += result.window_completion_ms;
-            max_load_ratio = std::max(max_load_ratio, result.cluster_max_load_ratio);
-            copies += copy_applied ? 1 : 0;
+                total_completion_ms += result.window_completion_ms;
+                max_load_ratio = std::max(max_load_ratio, result.cluster_max_load_ratio);
+                copies += copy_applied ? 1 : 0;
 
-            if (command.stream_json) {
-                StreamWindowJson(policy->Name(), command.config, result, total_completion_ms, copies);
-                if (command.window_delay_ms > 0) {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(command.window_delay_ms));
+                if (command.stream_json) {
+                    StreamWindowJson(
+                        policy->Name(), command.config, result, total_completion_ms, copies);
+                    StreamPlacementJson(
+                        memory_cluster.Snapshot(),
+                        "memory",
+                        window,
+                        copy_applied ? decision : std::nullopt,
+                        expired_replicas);
+                    if (command.window_delay_ms > 0) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(command.window_delay_ms));
+                    }
                 }
             }
             history.push_back(std::move(result));
         }
 
+        const auto evaluated_windows =
+            command.config.window_count - command.evaluation_start_window;
+
         if (command.stream_json) {
-            StreamCompleteJson(policy->Name(), command.config.window_count, total_completion_ms,
+            StreamCompleteJson(policy->Name(), evaluated_windows, total_completion_ms,
                                max_load_ratio, copies, output_path);
         } else {
             std::cout << "policy=" << policy->Name() << '\n'
-                      << "windows=" << command.config.window_count << '\n'
+                      << "windows=" << evaluated_windows << '\n'
+                      << "evaluation_start_window="
+                      << command.evaluation_start_window << '\n'
                       << "total_completion_ms=" << std::fixed << std::setprecision(3)
                       << total_completion_ms << '\n'
                       << "max_node_load_ratio=" << max_load_ratio << '\n'
