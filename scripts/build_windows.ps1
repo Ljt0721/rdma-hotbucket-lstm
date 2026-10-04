@@ -25,6 +25,7 @@ $commonArguments = @(
     "$($repoRoot)\src\cluster.cpp",
     "$($repoRoot)\src\entity_memory.cpp",
     "$($repoRoot)\src\policies.cpp",
+    "$($repoRoot)\src\replica_bundle.cpp",
     "$($repoRoot)\src\workload.cpp"
 )
 

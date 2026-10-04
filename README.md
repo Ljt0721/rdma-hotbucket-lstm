@@ -23,15 +23,21 @@ window-level demand without allowing a balancing policy to alter the training tr
 - Chronological train/validation/test construction using six windows to predict the next window
 - A small shared LSTM with early stopping, checkpoints, metrics, and test prediction export
 - Frozen prediction replay with copy cost, measured inference overhead, and paired comparisons
+- Versioned bucket bundles containing real entity bytes, allocation boundaries, TTL, and checksum
+- RDMA replica services that validate and commit bucket bundles before returning an ACK
+- An RDMA-enabled simulator that records WRITE time separately from end-to-end replication time
 
-The trained LSTM is connected to the simulated replication policy through a prediction CSV. Real
-RDMA CM/verbs transport now has a Linux copy probe and a documented Soft-RoCE path. It is not yet
-wired into every simulator copy. The current simulator does not claim to reproduce physical RDMA
-latency until its parameters are calibrated.
+The trained LSTM is connected to the replication policy through a prediction CSV. The normal
+`hotbucket_sim` keeps the deterministic local copy path. On Linux, `hotbucket_rdma_sim` sends every
+accepted copy decision to the selected RDMA replica service and updates routing only after the
+remote node validates and commits the bucket. Soft-RoCE is useful for protocol correctness, but
+physical-RNIC measurements are still required for hardware performance claims.
 
 The open-source selection and staged implementation plan are documented in
 [`docs/open-source-survey.md`](docs/open-source-survey.md). The project deliberately reuses small,
 understandable components instead of treating a large paper artifact as the thesis implementation.
+The first real-bucket transport result and its current limits are recorded in
+[`docs/rdma-replication-milestone.md`](docs/rdma-replication-milestone.md).
 After cloning, fetch the read-only references with:
 
 ```powershell
@@ -187,6 +193,25 @@ Linux Soft-RoCE/RXE first and on a physical RNIC later without changing the sour
 API. Setup, VM topology, build commands, and limitations are in
 [`docs/soft-roce.md`](docs/soft-roce.md).
 
+The replication service maps logical node IDs to consecutive ports. On the memory VM, start five
+logical memory-node services at ports 7600-7604:
+
+```bash
+bash scripts/start_rdma_replica_nodes.sh 5 7600
+```
+
+Then run a policy on the compute VM with real RDMA copies:
+
+```bash
+./build-rdma/hotbucket_rdma_sim \
+  --policy recent-window --windows 40 \
+  --rdma-server 192.168.64.128 --rdma-port-base 7600 \
+  --output results/recent-window-rdma.csv
+```
+
+The output CSV distinguishes pure `rdma_write_ms` from `rdma_end_to_end_ms`, which also includes
+the current per-copy connection and validation overhead.
+
 With the dashboard running, verify the SSE and dynamic-memory path with:
 
 ```powershell
@@ -212,9 +237,8 @@ third_party/         External research artifacts as Git submodules
 
 1. Create a new validation-only model experiment for the cases where LSTM misses abrupt changes;
    do not tune against the consumed formal test interval.
-2. Split the KV core from its transport, then add local and socket transports for multi-process
-   testing.
-3. Add CM/verbs transport and calibrate copy, metadata, and request service costs with Soft-RoCE.
+2. Reuse persistent RDMA connections so every bucket copy does not create a new CM/QP session.
+3. Calibrate copy, metadata, and request service costs on physical RDMA hardware.
 4. Generate a new untouched test corpus and repeat the primary comparison after calibration.
 
 ## Research rule

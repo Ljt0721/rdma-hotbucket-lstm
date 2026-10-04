@@ -396,6 +396,43 @@ std::size_t EntityMemoryCluster::PrimaryBytesInBucket(std::size_t bucket_id) con
     return bytes;
 }
 
+ReplicaBundle EntityMemoryCluster::BuildReplicaBundle(
+    std::size_t bucket_id,
+    std::size_t target_node,
+    std::size_t expires_after_window) const {
+    if (!CanReplicateBucket(bucket_id, target_node)) {
+        throw std::invalid_argument("bucket cannot be replicated to the requested target node");
+    }
+
+    ReplicaBundle bundle;
+    bundle.bucket_id = bucket_id;
+    bundle.target_node = target_node;
+    bundle.expires_after_window = expires_after_window;
+    for (std::size_t source_node = 0; source_node < nodes_.size(); ++source_node) {
+        const auto& node = nodes_[source_node];
+        for (const auto& allocation : node.allocations) {
+            if (allocation.bucket_id != bucket_id || allocation.is_replica) {
+                continue;
+            }
+            if (allocation.offset_bytes + allocation.allocated_bytes > node.memory.size()) {
+                throw std::logic_error("primary allocation extends beyond its memory node");
+            }
+            const auto begin = node.memory.begin() + allocation.offset_bytes;
+            bundle.records.push_back(ReplicaRecord{
+                allocation.entity.entity_id,
+                source_node,
+                allocation.serialized_bytes,
+                allocation.allocated_bytes,
+                std::vector<std::uint8_t>(begin, begin + allocation.allocated_bytes),
+            });
+        }
+    }
+    if (bundle.records.empty()) {
+        throw std::logic_error("replica bundle contains no primary allocations");
+    }
+    return bundle;
+}
+
 std::vector<std::uint8_t> EntityMemoryCluster::ReadSerializedEntity(
     std::uint64_t entity_id) const {
     for (const auto& node : nodes_) {

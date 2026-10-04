@@ -1,5 +1,7 @@
 #pragma once
 
+#include "hotbucket/replica_bundle.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -62,6 +64,9 @@ public:
                          std::size_t expires_after_window);
     std::size_t ExpireReplicas(std::size_t window_id);
     std::size_t PrimaryBytesInBucket(std::size_t bucket_id) const;
+    ReplicaBundle BuildReplicaBundle(std::size_t bucket_id,
+                                     std::size_t target_node,
+                                     std::size_t expires_after_window) const;
     std::vector<std::uint8_t> ReadSerializedEntity(std::uint64_t entity_id) const;
     std::vector<std::uint8_t> ReadSerializedEntity(std::uint64_t entity_id,
                                                    std::size_t node_id,

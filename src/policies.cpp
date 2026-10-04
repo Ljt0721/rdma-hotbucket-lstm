@@ -30,6 +30,15 @@ std::vector<std::string> SplitCsvRow(const std::string& row) {
     std::stringstream stream(row);
     std::string field;
     while (std::getline(stream, field, ',')) {
+        if (!field.empty() && field.back() == '\r') {
+            field.pop_back();
+        }
+        if (fields.empty() && field.size() >= 3 &&
+            static_cast<unsigned char>(field[0]) == 0xefU &&
+            static_cast<unsigned char>(field[1]) == 0xbbU &&
+            static_cast<unsigned char>(field[2]) == 0xbfU) {
+            field.erase(0, 3);
+        }
         fields.push_back(field);
     }
     return fields;

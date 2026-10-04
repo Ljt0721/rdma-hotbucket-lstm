@@ -1,10 +1,13 @@
 #include "hotbucket/cluster.hpp"
 #include "hotbucket/entity_memory.hpp"
 #include "hotbucket/policies.hpp"
+#include "hotbucket/replica_bundle.hpp"
 #include "hotbucket/workload.hpp"
 
 #include <cstdlib>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -251,6 +254,58 @@ void TestReplicaCopiesAndReclaimsEntityBytes() {
             "reclaiming a replica should restore initial physical memory usage");
 }
 
+void TestReplicaBundleRoundTripAndCorruptionDetection() {
+    const auto entities = hotbucket::MakeBattlefieldScenario(10);
+    hotbucket::EntityMemoryCluster memory_cluster(5, 64, 2048, 64);
+    memory_cluster.Allocate(entities);
+    const auto bucket_id = static_cast<std::size_t>(1003 % 64);
+
+    const auto bundle = memory_cluster.BuildReplicaBundle(bucket_id, 0, 7);
+    const auto encoded = hotbucket::EncodeReplicaBundle(bundle);
+    const auto decoded = hotbucket::DecodeReplicaBundle(encoded);
+    Require(decoded.bucket_id == bucket_id, "bundle should preserve its bucket ID");
+    Require(decoded.target_node == 0, "bundle should preserve its target node");
+    Require(decoded.expires_after_window == 7, "bundle should preserve its expiry window");
+    Require(decoded.records.size() == 1, "test bucket should contain one entity record");
+    Require(decoded.records[0].entity_id == 1003,
+            "bundle should preserve the replicated entity ID");
+    Require(decoded.records[0].bytes.size() == decoded.records[0].allocated_bytes,
+            "bundle should contain the complete aligned allocation");
+    Require(std::vector<std::uint8_t>(decoded.records[0].bytes.begin(),
+                                      decoded.records[0].bytes.begin() +
+                                          decoded.records[0].serialized_bytes) ==
+                hotbucket::SerializeEntity(entities[2]),
+            "bundle payload should match the primary entity bytes");
+
+    auto corrupted = encoded;
+    corrupted.back() ^= 0x01U;
+    bool rejected = false;
+    try {
+        static_cast<void>(hotbucket::DecodeReplicaBundle(corrupted));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    Require(rejected, "checksum should reject a corrupted replica bundle");
+}
+
+void TestPredictionCsvAcceptsWindowsLineEndingsOnLinux() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "hotbucket-prediction-crlf-test.csv";
+    {
+        std::ofstream output(path, std::ios::binary);
+        output << "trace_id,window_id,bucket_id,hotspot_probability,predicted_gets\r\n"
+               << "trace-crlf,8,43,0.75,1400.5\r\n";
+    }
+    const auto predictions =
+        hotbucket::LoadLstmPredictionsCsv(path.string(), "trace-crlf");
+    std::filesystem::remove(path);
+    Require(predictions.size() == 1, "CRLF prediction file should load one row");
+    Require(predictions[0].window_id == 8 && predictions[0].bucket_id == 43,
+            "CRLF prediction row should preserve its identifiers");
+    Require(std::abs(predictions[0].predicted_gets - 1400.5) < 1e-9,
+            "CRLF prediction row should preserve its numeric value");
+}
+
 }  // namespace
 
 int main() {
@@ -264,6 +319,8 @@ int main() {
         TestLstmPolicyUsesProbabilityAndCopyCost();
         TestControlOverheadIsIncludedInCompletionTime();
         TestReplicaCopiesAndReclaimsEntityBytes();
+        TestReplicaBundleRoundTripAndCorruptionDetection();
+        TestPredictionCsvAcceptsWindowsLineEndingsOnLinux();
         std::cout << "all tests passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

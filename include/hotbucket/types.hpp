@@ -74,6 +74,10 @@ struct WindowResult {
     double window_completion_ms{};
     double copy_cost_ms{};
     double control_overhead_ms{};
+    bool rdma_copy{false};
+    std::size_t copied_bytes{};
+    double rdma_write_ms{};
+    double rdma_end_to_end_ms{};
     std::optional<ReplicationDecision> decision;
     bool copy_applied{false};
 };

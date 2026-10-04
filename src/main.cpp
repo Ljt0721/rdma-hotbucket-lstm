@@ -3,6 +3,10 @@
 #include "hotbucket/policies.hpp"
 #include "hotbucket/workload.hpp"
 
+#ifdef HOTBUCKET_HAS_RDMA
+#include "hotbucket/rdma_replication.hpp"
+#endif
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +34,8 @@ struct CommandLine {
     double lstm_minimum_probability{0.70};
     double lstm_minimum_predicted_get_ratio{1.0};
     double lstm_inference_cost_ms{0.0};
+    std::string rdma_server;
+    std::uint16_t rdma_port_base{7600};
     bool stream_json{false};
     bool placement_only{false};
     bool trace_only{false};
@@ -109,6 +115,14 @@ CommandLine ParseArguments(int argc, char** argv) {
         } else if (argument == "--evaluation-start-window") {
             command.evaluation_start_window =
                 std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--rdma-server") {
+            command.rdma_server = RequireValue(index, argc, argv);
+        } else if (argument == "--rdma-port-base") {
+            const auto port = std::stoull(RequireValue(index, argc, argv));
+            if (port == 0 || port > 65535) {
+                throw std::invalid_argument("rdma-port-base must be between 1 and 65535");
+            }
+            command.rdma_port_base = static_cast<std::uint16_t>(port);
         } else if (argument == "--stream-json") {
             command.stream_json = true;
         } else if (argument == "--placement-only") {
@@ -131,6 +145,7 @@ CommandLine ParseArguments(int argc, char** argv) {
                 << "  --lstm-min-predicted-get-ratio R\n"
                 << "  --lstm-inference-cost-ms R\n"
                 << "  --evaluation-start-window N\n"
+                << "  --rdma-server IPv4 --rdma-port-base N\n"
                 << "  --window-seconds N --window-delay-ms N\n"
                 << "  --output path/to/result.csv\n";
             std::exit(0);
@@ -228,7 +243,8 @@ void WriteHeader(std::ofstream& output) {
               "cluster_max_load_ratio,window_completion_ms,copy_applied,copy_cost_ms,"
               "control_overhead_ms,"
               "decision_bucket,predicted_gets,hotspot_probability,"
-              "expected_benefit_ms,expected_cost_ms\n";
+              "expected_benefit_ms,expected_cost_ms,"
+              "rdma_copy,copied_bytes,rdma_write_ms,rdma_end_to_end_ms\n";
 }
 
 void WriteWindow(std::ofstream& output,
@@ -260,6 +276,10 @@ void WriteWindow(std::ofstream& output,
         } else {
             output << ",,,,";
         }
+        output << ',' << (decision_for_bucket && result.rdma_copy ? 1 : 0) << ','
+               << (decision_for_bucket ? result.copied_bytes : 0) << ','
+               << (decision_for_bucket ? result.rdma_write_ms : 0.0) << ','
+               << (decision_for_bucket ? result.rdma_end_to_end_ms : 0.0);
         output << '\n';
     }
 }
@@ -397,6 +417,10 @@ void StreamWindowJson(const std::string& policy,
               << ",\"totalCompletionMs\":" << total_completion_ms
               << ",\"copyApplied\":" << (result.copy_applied ? "true" : "false")
               << ",\"copyCostMs\":" << result.copy_cost_ms
+              << ",\"rdmaCopy\":" << (result.rdma_copy ? "true" : "false")
+              << ",\"copiedBytes\":" << result.copied_bytes
+              << ",\"rdmaWriteMs\":" << result.rdma_write_ms
+              << ",\"rdmaEndToEndMs\":" << result.rdma_end_to_end_ms
               << ",\"controlOverheadMs\":" << result.control_overhead_ms
               << ",\"copies\":" << copies << ",\"decision\":";
 
@@ -492,6 +516,19 @@ int main(int argc, char** argv) {
         if (command.lstm_inference_cost_ms < 0.0) {
             throw std::invalid_argument("lstm_inference_cost_ms cannot be negative");
         }
+        if (!command.rdma_server.empty()) {
+#ifndef HOTBUCKET_HAS_RDMA
+            throw std::invalid_argument(
+                "this executable was built without RDMA support; use hotbucket_rdma_sim");
+#else
+            const auto highest_port = static_cast<std::size_t>(command.rdma_port_base) +
+                                      command.config.node_count - 1;
+            if (highest_port > 65535) {
+                throw std::invalid_argument(
+                    "rdma-port-base plus the highest node ID exceeds 65535");
+            }
+#endif
+        }
         std::vector<hotbucket::LstmBucketPrediction> lstm_predictions;
         if (command.policy == "lstm") {
             if (command.prediction_file.empty()) {
@@ -540,15 +577,47 @@ int main(int argc, char** argv) {
             }
             double copy_cost_ms = 0.0;
             bool copy_applied = false;
+            bool rdma_copy = false;
+            std::size_t copied_bytes = 0;
+            double rdma_write_ms = 0.0;
+            double rdma_end_to_end_ms = 0.0;
             if (decision.has_value()) {
                 const auto expires_after = window + command.config.replica_ttl_windows;
-                if (memory_cluster.ReplicateBucket(
-                        decision->bucket_id, decision->target_node, expires_after)) {
+                if (memory_cluster.CanReplicateBucket(
+                        decision->bucket_id, decision->target_node)) {
+#ifdef HOTBUCKET_HAS_RDMA
+                    double measured_rdma_cost_ms = 0.0;
+                    if (!command.rdma_server.empty()) {
+                        const auto bundle = memory_cluster.BuildReplicaBundle(
+                            decision->bucket_id, decision->target_node, expires_after);
+                        const auto encoded = hotbucket::EncodeReplicaBundle(bundle);
+                        const auto target_port = static_cast<std::uint16_t>(
+                            static_cast<std::size_t>(command.rdma_port_base) +
+                            decision->target_node);
+                        const auto transfer = hotbucket::ReplicateBundleRdma(
+                            command.rdma_server, target_port, encoded);
+                        measured_rdma_cost_ms = transfer.end_to_end_ms;
+                        rdma_copy = true;
+                        copied_bytes = transfer.transferred_bytes;
+                        rdma_write_ms = transfer.write_completion_ms;
+                        rdma_end_to_end_ms = transfer.end_to_end_ms;
+                    }
+#endif
+                    if (!memory_cluster.ReplicateBucket(
+                            decision->bucket_id, decision->target_node, expires_after)) {
+                        throw std::logic_error(
+                            "replica became invalid after its transport completed");
+                    }
                     copy_applied = cluster.ApplyReplication(*decision, window, &copy_cost_ms);
                     if (!copy_applied) {
                         throw std::logic_error(
                             "memory copy succeeded but routing replica was rejected");
                     }
+#ifdef HOTBUCKET_HAS_RDMA
+                    if (!command.rdma_server.empty()) {
+                        copy_cost_ms = measured_rdma_cost_ms;
+                    }
+#endif
                 }
             }
 
@@ -562,6 +631,10 @@ int main(int argc, char** argv) {
                 window, hot_bucket, requests, copy_cost_ms, control_overhead_ms);
             result.decision = decision;
             result.copy_applied = copy_applied;
+            result.rdma_copy = rdma_copy;
+            result.copied_bytes = copied_bytes;
+            result.rdma_write_ms = rdma_write_ms;
+            result.rdma_end_to_end_ms = rdma_end_to_end_ms;
             if (window >= command.evaluation_start_window) {
                 WriteWindow(output, policy->Name(), result);
 

@@ -101,6 +101,35 @@ ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 Run the matching sanitizer client on the other VM. Test equal sizes for success and deliberately
 different sizes to confirm that both sides reject a partial or oversized transfer.
 
+## Replicate an entity bucket
+
+The copy probe above sends a deterministic byte pattern. The replica service sends the actual
+aligned bytes of every entity in a selected bucket, together with record boundaries, target node,
+expiry window, and a checksum. Start logical memory node 0 on the memory VM:
+
+```bash
+./build-rdma/hotbucket_rdma_replica server \
+  --port 7600 --node-id 0 --max-replications 1
+```
+
+Replicate bucket 43 from the ten-entity scenario on the compute VM:
+
+```bash
+./build-rdma/hotbucket_rdma_replica client \
+  --server 192.168.64.128 --port 7600 \
+  --bucket 43 --target-node 0 --expires-after-window 7
+```
+
+The client performs `IBV_WR_RDMA_WRITE`. The server decodes the received bucket, verifies its exact
+length and checksum, moves the registered bytes into its replica store, and only then sends an ACK.
+For a policy run, start one service per logical target node with
+`scripts/start_rdma_replica_nodes.sh`. Port `7600 + node_id` identifies the target node.
+
+The current service establishes one RC connection per copy. This makes the implementation easy to
+validate, but its `rdma_end_to_end_ms` includes CM/QP setup. `rdma_write_ms` records only the WRITE
+completion interval. Persistent connections are the next transport optimization and should be
+implemented before treating Soft-RoCE end-to-end time as a steady-state copy cost.
+
 ## Relation to the simulator
 
 This probe is the first transport milestone, not yet the complete distributed KV store. Its measured
