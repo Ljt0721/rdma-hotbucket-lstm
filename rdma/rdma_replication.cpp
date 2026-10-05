@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <rdma/rdma_cma.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cerrno>
 #include <cstdint>
@@ -30,10 +31,11 @@ constexpr int kResolveTimeoutMs = 5000;
 constexpr int kCmEventTimeoutMs = 30000;
 constexpr int kServerIdleTimeoutMs = 300000;
 constexpr int kCompletionTimeoutMs = 60000;
-constexpr std::uint32_t kRequestMagic = 0x48425251U;
+constexpr std::uint32_t kSessionMagic = 0x48425351U;
+constexpr std::uint32_t kDescriptorMagic = 0x4842534DU;
 constexpr std::uint32_t kDoneMagic = 0x48425244U;
 constexpr std::uint32_t kAckMagic = 0x48425241U;
-constexpr std::uint32_t kProtocolVersion = 1;
+constexpr std::uint32_t kProtocolVersion = 2;
 
 enum class TransferStatus : std::uint32_t {
     kSuccess = 0,
@@ -42,34 +44,46 @@ enum class TransferStatus : std::uint32_t {
     kChecksumMismatch = 3,
     kInvalidBundle = 4,
     kWrongTarget = 5,
+    kInvalidSequence = 6,
 };
 
-struct ReplicaRequestWire {
+struct SessionRequestWire {
     std::uint32_t magic_be{};
     std::uint32_t version_be{};
-    std::uint32_t bundle_bytes_be{};
-    std::uint32_t bucket_id_be{};
+    std::uint32_t staging_bytes_be{};
     std::uint32_t target_node_be{};
-    std::uint32_t checksum_be{};
 };
 
 struct MemoryDescriptor {
+    std::uint32_t magic_be{};
+    std::uint32_t version_be{};
     std::uint64_t address_be{};
     std::uint32_t rkey_be{};
     std::uint32_t length_be{};
+    std::uint32_t target_node_be{};
+    std::uint32_t reserved_be{};
 };
 
 struct ControlMessage {
     std::uint32_t magic_be{};
+    std::uint32_t version_be{};
+    std::uint64_t sequence_be{};
     std::uint32_t length_be{};
-    std::uint32_t status_be{};
     std::uint32_t bucket_id_be{};
+    std::uint32_t target_node_be{};
     std::uint32_t checksum_be{};
+    std::uint32_t status_be{};
+    std::uint32_t reserved_be{};
 };
 
-static_assert(sizeof(ReplicaRequestWire) == 24, "unexpected replica request layout");
-static_assert(sizeof(MemoryDescriptor) == 16, "unexpected memory descriptor layout");
-static_assert(sizeof(ControlMessage) == 20, "unexpected control-message layout");
+static_assert(sizeof(SessionRequestWire) == 16, "unexpected session request layout");
+static_assert(sizeof(MemoryDescriptor) == 32, "unexpected memory descriptor layout");
+static_assert(sizeof(ControlMessage) == 40, "unexpected control-message layout");
+
+class PeerDisconnected final : public std::runtime_error {
+public:
+    PeerDisconnected() : std::runtime_error("RDMA peer disconnected") {}
+};
 
 struct EventChannel {
     rdma_event_channel* value{};
@@ -146,27 +160,13 @@ struct ConnectionResources {
     ConnectionResources(const ConnectionResources&) = delete;
     ConnectionResources& operator=(const ConnectionResources&) = delete;
     ConnectionResources() = default;
-
-    std::vector<std::uint8_t> ReleaseRegisteredData() {
-        if (data_mr == nullptr) {
-            throw std::logic_error("RDMA data region has already been released");
-        }
-        const int result = ibv_dereg_mr(data_mr);
-        if (result != 0) {
-            const int error_code = result > 0 ? result : errno;
-            throw std::runtime_error(
-                "ibv_dereg_mr(committed data): " +
-                std::string(std::strerror(error_code)));
-        }
-        data_mr = nullptr;
-        return std::move(data);
-    }
 };
 
 struct StoredReplica {
     ReplicaBundle bundle;
     std::vector<std::uint8_t> encoded;
     std::size_t generation{};
+    std::uint64_t sequence{};
 };
 
 void Check(int result, const std::string& operation) {
@@ -236,7 +236,7 @@ void ThrowIfConnectionClosed(rdma_event_channel* channel) {
     const int status = event->status;
     Check(rdma_ack_cm_event(event), "rdma_ack_cm_event(connection event)");
     if (event_type == RDMA_CM_EVENT_DISCONNECTED) {
-        throw std::runtime_error("peer disconnected before replication completed");
+        throw PeerDisconnected();
     }
     throw std::runtime_error(
         "unexpected CM event while waiting for completion: " +
@@ -258,7 +258,7 @@ void CreateQueuePair(ConnectionResources& resources,
                      std::size_t bytes,
                      bool remote_target) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::invalid_argument("RDMA bundle length is outside the protocol limit");
+        throw std::invalid_argument("RDMA staging length is outside the protocol limit");
     }
     resources.pd = ibv_alloc_pd(resources.id->verbs);
     if (resources.pd == nullptr) {
@@ -280,11 +280,7 @@ void CreateQueuePair(ConnectionResources& resources,
     attributes.cap.max_recv_sge = 1;
     Check(rdma_create_qp(resources.id, resources.pd, &attributes), "rdma_create_qp");
 
-    if (resources.data.empty()) {
-        resources.data.resize(bytes, 0);
-    } else if (resources.data.size() != bytes) {
-        throw std::logic_error("preloaded RDMA data does not match the requested region size");
-    }
+    resources.data.assign(bytes, 0);
     int data_access = IBV_ACCESS_LOCAL_WRITE;
     if (remote_target) {
         data_access |= IBV_ACCESS_REMOTE_WRITE;
@@ -292,7 +288,7 @@ void CreateQueuePair(ConnectionResources& resources,
     resources.data_mr = ibv_reg_mr(
         resources.pd, resources.data.data(), resources.data.size(), data_access);
     if (resources.data_mr == nullptr) {
-        throw std::runtime_error("ibv_reg_mr(replica bundle) failed");
+        throw std::runtime_error("ibv_reg_mr(replica staging buffer) failed");
     }
     resources.send_control_mr = ibv_reg_mr(
         resources.pd,
@@ -310,6 +306,7 @@ void CreateQueuePair(ConnectionResources& resources,
 }
 
 void PostReceive(ConnectionResources& resources) {
+    resources.receive_control = ControlMessage{};
     ibv_sge scatter{};
     scatter.addr = reinterpret_cast<std::uintptr_t>(&resources.receive_control);
     scatter.length = sizeof(resources.receive_control);
@@ -371,14 +368,14 @@ ibv_wc WaitCompletion(rdma_event_channel* channel,
     throw std::runtime_error("replication completion queue timeout");
 }
 
-ReplicaRequestWire ParseRequest(const rdma_cm_event& event) {
+SessionRequestWire ParseSessionRequest(const rdma_cm_event& event) {
     if (event.param.conn.private_data == nullptr ||
-        event.param.conn.private_data_len < sizeof(ReplicaRequestWire)) {
-        throw std::invalid_argument("client did not provide a replica request");
+        event.param.conn.private_data_len < sizeof(SessionRequestWire)) {
+        throw std::invalid_argument("client did not provide an RDMA session request");
     }
-    ReplicaRequestWire request{};
+    SessionRequestWire request{};
     std::memcpy(&request, event.param.conn.private_data, sizeof(request));
-    if (ntohl(request.magic_be) != kRequestMagic ||
+    if (ntohl(request.magic_be) != kSessionMagic ||
         ntohl(request.version_be) != kProtocolVersion) {
         throw std::invalid_argument("client used an unsupported replication protocol");
     }
@@ -399,133 +396,247 @@ std::string StatusName(TransferStatus status) {
             return "invalid-bundle";
         case TransferStatus::kWrongTarget:
             return "wrong-target";
+        case TransferStatus::kInvalidSequence:
+            return "invalid-sequence";
     }
     return "unknown";
 }
 
 }  // namespace
 
+struct RdmaReplicaSession::Impl {
+    EventChannel channel;
+    ConnectionResources resources;
+    std::size_t target_node{};
+    std::size_t staging_bytes{};
+    std::uint64_t remote_address{};
+    std::uint32_t remote_rkey{};
+    std::uint64_t next_sequence{1};
+    double setup_ms{};
+    std::string provider;
+    bool connected{false};
+
+    Impl(const std::string& server_ip,
+         std::uint16_t port,
+         std::size_t requested_target_node,
+         std::size_t requested_staging_bytes)
+        : target_node(requested_target_node), staging_bytes(requested_staging_bytes) {
+        if (target_node > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("target node exceeds the RDMA protocol limit");
+        }
+        if (staging_bytes == 0 ||
+            staging_bytes > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("staging bytes are outside the RDMA protocol limit");
+        }
+
+        const auto setup_started = std::chrono::steady_clock::now();
+        Check(rdma_create_id(channel.value, &resources.id, nullptr, RDMA_PS_TCP),
+              "rdma_create_id(client)");
+        auto address = Address(server_ip, port, false);
+        Check(rdma_resolve_addr(
+                  resources.id,
+                  nullptr,
+                  reinterpret_cast<sockaddr*>(&address),
+                  kResolveTimeoutMs),
+              "rdma_resolve_addr");
+        rdma_cm_event* resolved =
+            WaitEvent(channel.value, RDMA_CM_EVENT_ADDR_RESOLVED);
+        Check(rdma_ack_cm_event(resolved), "rdma_ack_cm_event(address resolved)");
+        Check(rdma_resolve_route(resources.id, kResolveTimeoutMs), "rdma_resolve_route");
+        rdma_cm_event* routed =
+            WaitEvent(channel.value, RDMA_CM_EVENT_ROUTE_RESOLVED);
+        Check(rdma_ack_cm_event(routed), "rdma_ack_cm_event(route resolved)");
+
+        CreateQueuePair(resources, staging_bytes, false);
+        SessionRequestWire request{};
+        request.magic_be = htonl(kSessionMagic);
+        request.version_be = htonl(kProtocolVersion);
+        request.staging_bytes_be = htonl(static_cast<std::uint32_t>(staging_bytes));
+        request.target_node_be = htonl(static_cast<std::uint32_t>(target_node));
+        rdma_conn_param connection{};
+        connection.private_data = &request;
+        connection.private_data_len = sizeof(request);
+        connection.responder_resources = 1;
+        connection.initiator_depth = 1;
+        connection.retry_count = 7;
+        Check(rdma_connect(resources.id, &connection), "rdma_connect");
+        rdma_cm_event* established =
+            WaitEvent(channel.value, RDMA_CM_EVENT_ESTABLISHED);
+        if (established->param.conn.private_data == nullptr ||
+            established->param.conn.private_data_len < sizeof(MemoryDescriptor)) {
+            Check(rdma_ack_cm_event(established),
+                  "rdma_ack_cm_event(invalid established)");
+            throw std::runtime_error("replica server did not provide a memory descriptor");
+        }
+        MemoryDescriptor descriptor{};
+        std::memcpy(&descriptor, established->param.conn.private_data, sizeof(descriptor));
+        Check(rdma_ack_cm_event(established), "rdma_ack_cm_event(client established)");
+        if (ntohl(descriptor.magic_be) != kDescriptorMagic ||
+            ntohl(descriptor.version_be) != kProtocolVersion ||
+            ntohl(descriptor.length_be) != staging_bytes ||
+            ntohl(descriptor.target_node_be) != target_node) {
+            rdma_disconnect(resources.id);
+            throw std::runtime_error("replica server returned an invalid memory descriptor");
+        }
+        remote_address = be64toh(descriptor.address_be);
+        remote_rkey = ntohl(descriptor.rkey_be);
+        provider = ibv_get_device_name(resources.id->verbs->device);
+        connected = true;
+        setup_ms = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - setup_started)
+                       .count();
+    }
+
+    ~Impl() {
+        DisconnectNoThrow();
+    }
+
+    void DisconnectNoThrow() noexcept {
+        if (!connected || resources.id == nullptr) {
+            return;
+        }
+        if (rdma_disconnect(resources.id) == 0) {
+            try {
+                rdma_cm_event* disconnected =
+                    WaitEvent(channel.value, RDMA_CM_EVENT_DISCONNECTED, 2000);
+                rdma_ack_cm_event(disconnected);
+            } catch (...) {
+            }
+        }
+        connected = false;
+    }
+
+    RdmaReplicationResult Replicate(
+        const std::vector<std::uint8_t>& encoded_bundle) {
+        if (!connected) {
+            throw std::runtime_error("RDMA replica session is not connected");
+        }
+        const auto operation_started = std::chrono::steady_clock::now();
+        const ReplicaBundle bundle = DecodeReplicaBundle(encoded_bundle);
+        if (bundle.target_node != target_node) {
+            throw std::invalid_argument(
+                "replica bundle target does not match the persistent session");
+        }
+        if (encoded_bundle.size() > staging_bytes) {
+            throw std::length_error("replica bundle exceeds the persistent staging buffer");
+        }
+        if (next_sequence == 0) {
+            throw std::overflow_error("RDMA replication sequence number wrapped");
+        }
+        const std::uint64_t sequence = next_sequence++;
+        const std::uint32_t checksum = ReplicaBundleChecksum(encoded_bundle);
+        std::copy(encoded_bundle.begin(), encoded_bundle.end(), resources.data.begin());
+        PostReceive(resources);
+
+        ibv_sge scatter{};
+        scatter.addr = reinterpret_cast<std::uintptr_t>(resources.data.data());
+        scatter.length = static_cast<std::uint32_t>(encoded_bundle.size());
+        scatter.lkey = resources.data_mr->lkey;
+        ibv_send_wr write_request{};
+        write_request.wr_id = 2;
+        write_request.sg_list = &scatter;
+        write_request.num_sge = 1;
+        write_request.opcode = IBV_WR_RDMA_WRITE;
+        write_request.send_flags = IBV_SEND_SIGNALED;
+        write_request.wr.rdma.remote_addr = remote_address;
+        write_request.wr.rdma.rkey = remote_rkey;
+        ibv_send_wr* bad_request = nullptr;
+        const auto write_started = std::chrono::steady_clock::now();
+        Check(ibv_post_send(resources.id->qp, &write_request, &bad_request),
+              "ibv_post_send(RDMA_WRITE replica)");
+        WaitCompletion(channel.value, resources.send_cq, 2, IBV_WC_RDMA_WRITE);
+        const auto write_finished = std::chrono::steady_clock::now();
+
+        resources.send_control = ControlMessage{};
+        resources.send_control.magic_be = htonl(kDoneMagic);
+        resources.send_control.version_be = htonl(kProtocolVersion);
+        resources.send_control.sequence_be = htobe64(sequence);
+        resources.send_control.length_be =
+            htonl(static_cast<std::uint32_t>(encoded_bundle.size()));
+        resources.send_control.bucket_id_be =
+            htonl(static_cast<std::uint32_t>(bundle.bucket_id));
+        resources.send_control.target_node_be =
+            htonl(static_cast<std::uint32_t>(bundle.target_node));
+        resources.send_control.checksum_be = htonl(checksum);
+        PostControl(resources, 3);
+        WaitCompletion(channel.value, resources.send_cq, 3, IBV_WC_SEND);
+
+        const ibv_wc acknowledgement =
+            WaitCompletion(channel.value, resources.receive_cq, 1, IBV_WC_RECV);
+        const auto status = static_cast<TransferStatus>(
+            ntohl(resources.receive_control.status_be));
+        if (acknowledgement.byte_len != sizeof(ControlMessage) ||
+            ntohl(resources.receive_control.magic_be) != kAckMagic ||
+            ntohl(resources.receive_control.version_be) != kProtocolVersion ||
+            be64toh(resources.receive_control.sequence_be) != sequence ||
+            ntohl(resources.receive_control.length_be) != encoded_bundle.size() ||
+            ntohl(resources.receive_control.bucket_id_be) != bundle.bucket_id ||
+            ntohl(resources.receive_control.target_node_be) != bundle.target_node ||
+            ntohl(resources.receive_control.checksum_be) != checksum ||
+            status != TransferStatus::kSuccess) {
+            throw std::runtime_error(
+                "replica server rejected sequence " + std::to_string(sequence) +
+                "; status=" + StatusName(status));
+        }
+
+        const auto operation_finished = std::chrono::steady_clock::now();
+        return RdmaReplicationResult{
+            bundle.bucket_id,
+            bundle.target_node,
+            encoded_bundle.size(),
+            sequence,
+            std::chrono::duration<double, std::milli>(
+                write_finished - write_started)
+                .count(),
+            std::chrono::duration<double, std::milli>(
+                operation_finished - operation_started)
+                .count(),
+            provider,
+        };
+    }
+};
+
+RdmaReplicaSession::RdmaReplicaSession(const std::string& server_ip,
+                                       std::uint16_t port,
+                                       std::size_t target_node,
+                                       std::size_t staging_bytes)
+    : impl_(std::make_unique<Impl>(
+          server_ip, port, target_node, staging_bytes)) {}
+
+RdmaReplicaSession::~RdmaReplicaSession() = default;
+RdmaReplicaSession::RdmaReplicaSession(RdmaReplicaSession&&) noexcept = default;
+RdmaReplicaSession& RdmaReplicaSession::operator=(RdmaReplicaSession&&) noexcept = default;
+
+RdmaReplicationResult RdmaReplicaSession::Replicate(
+    const std::vector<std::uint8_t>& encoded_bundle) {
+    if (!impl_) {
+        throw std::logic_error("RDMA replica session was moved from");
+    }
+    return impl_->Replicate(encoded_bundle);
+}
+
+std::size_t RdmaReplicaSession::target_node() const noexcept {
+    return impl_ ? impl_->target_node : 0;
+}
+
+std::size_t RdmaReplicaSession::staging_bytes() const noexcept {
+    return impl_ ? impl_->staging_bytes : 0;
+}
+
+double RdmaReplicaSession::setup_ms() const noexcept {
+    return impl_ ? impl_->setup_ms : 0.0;
+}
+
 RdmaReplicationResult ReplicateBundleRdma(
     const std::string& server_ip,
     std::uint16_t port,
     const std::vector<std::uint8_t>& encoded_bundle) {
-    const auto overall_started = std::chrono::steady_clock::now();
-    const ReplicaBundle bundle = DecodeReplicaBundle(encoded_bundle);
-    if (encoded_bundle.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::length_error("encoded replica bundle exceeds the RDMA protocol limit");
-    }
-    if (bundle.bucket_id > std::numeric_limits<std::uint32_t>::max() ||
-        bundle.target_node > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::length_error("replica metadata exceeds the RDMA protocol limit");
-    }
-    const std::uint32_t checksum = ReplicaBundleChecksum(encoded_bundle);
-
-    EventChannel channel;
-    ConnectionResources resources;
-    Check(rdma_create_id(channel.value, &resources.id, nullptr, RDMA_PS_TCP),
-          "rdma_create_id(client)");
-    auto address = Address(server_ip, port, false);
-    Check(rdma_resolve_addr(
-              resources.id,
-              nullptr,
-              reinterpret_cast<sockaddr*>(&address),
-              kResolveTimeoutMs),
-          "rdma_resolve_addr");
-    rdma_cm_event* resolved = WaitEvent(channel.value, RDMA_CM_EVENT_ADDR_RESOLVED);
-    Check(rdma_ack_cm_event(resolved), "rdma_ack_cm_event(address resolved)");
-    Check(rdma_resolve_route(resources.id, kResolveTimeoutMs), "rdma_resolve_route");
-    rdma_cm_event* routed = WaitEvent(channel.value, RDMA_CM_EVENT_ROUTE_RESOLVED);
-    Check(rdma_ack_cm_event(routed), "rdma_ack_cm_event(route resolved)");
-
-    resources.data = encoded_bundle;
-    CreateQueuePair(resources, encoded_bundle.size(), false);
-    PostReceive(resources);
-
-    ReplicaRequestWire request{};
-    request.magic_be = htonl(kRequestMagic);
-    request.version_be = htonl(kProtocolVersion);
-    request.bundle_bytes_be = htonl(static_cast<std::uint32_t>(encoded_bundle.size()));
-    request.bucket_id_be = htonl(static_cast<std::uint32_t>(bundle.bucket_id));
-    request.target_node_be = htonl(static_cast<std::uint32_t>(bundle.target_node));
-    request.checksum_be = htonl(checksum);
-    rdma_conn_param connection{};
-    connection.private_data = &request;
-    connection.private_data_len = sizeof(request);
-    connection.responder_resources = 1;
-    connection.initiator_depth = 1;
-    connection.retry_count = 7;
-    Check(rdma_connect(resources.id, &connection), "rdma_connect");
-    rdma_cm_event* established = WaitEvent(channel.value, RDMA_CM_EVENT_ESTABLISHED);
-    if (established->param.conn.private_data == nullptr ||
-        established->param.conn.private_data_len < sizeof(MemoryDescriptor)) {
-        Check(rdma_ack_cm_event(established), "rdma_ack_cm_event(invalid established)");
-        throw std::runtime_error("replica server did not provide a memory descriptor");
-    }
-    MemoryDescriptor descriptor{};
-    std::memcpy(&descriptor, established->param.conn.private_data, sizeof(descriptor));
-    Check(rdma_ack_cm_event(established), "rdma_ack_cm_event(client established)");
-    if (ntohl(descriptor.length_be) != encoded_bundle.size()) {
-        Check(rdma_disconnect(resources.id), "rdma_disconnect(length mismatch)");
-        throw std::runtime_error("replica server registered an unexpected region length");
-    }
-
-    ibv_sge scatter{};
-    scatter.addr = reinterpret_cast<std::uintptr_t>(resources.data.data());
-    scatter.length = static_cast<std::uint32_t>(resources.data.size());
-    scatter.lkey = resources.data_mr->lkey;
-    ibv_send_wr write_request{};
-    write_request.wr_id = 2;
-    write_request.sg_list = &scatter;
-    write_request.num_sge = 1;
-    write_request.opcode = IBV_WR_RDMA_WRITE;
-    write_request.send_flags = IBV_SEND_SIGNALED;
-    write_request.wr.rdma.remote_addr = be64toh(descriptor.address_be);
-    write_request.wr.rdma.rkey = ntohl(descriptor.rkey_be);
-    ibv_send_wr* bad_request = nullptr;
-    const auto write_started = std::chrono::steady_clock::now();
-    Check(ibv_post_send(resources.id->qp, &write_request, &bad_request),
-          "ibv_post_send(RDMA_WRITE replica)");
-    WaitCompletion(channel.value, resources.send_cq, 2, IBV_WC_RDMA_WRITE);
-    const auto write_finished = std::chrono::steady_clock::now();
-
-    resources.send_control.magic_be = htonl(kDoneMagic);
-    resources.send_control.length_be =
-        htonl(static_cast<std::uint32_t>(encoded_bundle.size()));
-    resources.send_control.status_be = htonl(0);
-    resources.send_control.bucket_id_be =
-        htonl(static_cast<std::uint32_t>(bundle.bucket_id));
-    resources.send_control.checksum_be = htonl(checksum);
-    PostControl(resources, 3);
-    WaitCompletion(channel.value, resources.send_cq, 3, IBV_WC_SEND);
-
-    const ibv_wc acknowledgement =
-        WaitCompletion(channel.value, resources.receive_cq, 1, IBV_WC_RECV);
-    const auto status = static_cast<TransferStatus>(
-        ntohl(resources.receive_control.status_be));
-    if (acknowledgement.byte_len != sizeof(ControlMessage) ||
-        ntohl(resources.receive_control.magic_be) != kAckMagic ||
-        ntohl(resources.receive_control.length_be) != encoded_bundle.size() ||
-        ntohl(resources.receive_control.bucket_id_be) != bundle.bucket_id ||
-        ntohl(resources.receive_control.checksum_be) != checksum ||
-        status != TransferStatus::kSuccess) {
-        rdma_disconnect(resources.id);
-        throw std::runtime_error(
-            "replica server rejected the bucket bundle; status=" + StatusName(status));
-    }
-
-    const std::string provider = ibv_get_device_name(resources.id->verbs->device);
-    Check(rdma_disconnect(resources.id), "rdma_disconnect");
-    rdma_cm_event* disconnected = WaitEvent(channel.value, RDMA_CM_EVENT_DISCONNECTED);
-    Check(rdma_ack_cm_event(disconnected), "rdma_ack_cm_event(client disconnected)");
-    const auto overall_finished = std::chrono::steady_clock::now();
-    return RdmaReplicationResult{
-        bundle.bucket_id,
-        bundle.target_node,
-        encoded_bundle.size(),
-        std::chrono::duration<double, std::milli>(write_finished - write_started).count(),
-        std::chrono::duration<double, std::milli>(overall_finished - overall_started).count(),
-        provider,
-    };
+    const auto bundle = DecodeReplicaBundle(encoded_bundle);
+    const std::size_t staging_bytes =
+        std::max(kDefaultRdmaStagingBytes, encoded_bundle.size());
+    RdmaReplicaSession session(
+        server_ip, port, bundle.target_node, staging_bytes);
+    return session.Replicate(encoded_bundle);
 }
 
 void RunRdmaReplicaServer(std::uint16_t port,
@@ -554,43 +665,47 @@ void RunRdmaReplicaServer(std::uint16_t port,
     std::map<std::size_t, StoredReplica> replicas;
     std::size_t attempts = 0;
     std::size_t generation = 0;
+    std::size_t session_count = 0;
     while (maximum_replications == 0 || attempts < maximum_replications) {
-        rdma_cm_event* request_event =
-            WaitEvent(
-                channel.value, RDMA_CM_EVENT_CONNECT_REQUEST, kServerIdleTimeoutMs);
+        const int idle_timeout = maximum_replications == 0 ? -1 : kServerIdleTimeoutMs;
+        rdma_cm_event* request_event = WaitEvent(
+            channel.value, RDMA_CM_EVENT_CONNECT_REQUEST, idle_timeout);
         ConnectionResources resources;
         resources.id = request_event->id;
-        ReplicaRequestWire request{};
+        SessionRequestWire request{};
         try {
-            request = ParseRequest(*request_event);
-        } catch (...) {
+            request = ParseSessionRequest(*request_event);
+        } catch (const std::exception& error) {
             Check(rdma_ack_cm_event(request_event),
-                  "rdma_ack_cm_event(invalid connect request)");
-            throw;
+                  "rdma_ack_cm_event(invalid session request)");
+            rdma_reject(resources.id, nullptr, 0);
+            std::cerr << "replica_session_rejected node=" << node_id
+                      << " reason=" << error.what() << std::endl;
+            continue;
         }
         Check(rdma_ack_cm_event(request_event), "rdma_ack_cm_event(connect request)");
-        ++attempts;
 
-        const std::size_t bytes = ntohl(request.bundle_bytes_be);
-        const std::size_t requested_bucket = ntohl(request.bucket_id_be);
+        const std::size_t staging_bytes = ntohl(request.staging_bytes_be);
         const std::size_t requested_target = ntohl(request.target_node_be);
-        const std::uint32_t requested_checksum = ntohl(request.checksum_be);
-        if (bytes == 0 || bytes > maximum_bundle_bytes) {
-            Check(rdma_reject(resources.id, nullptr, 0), "rdma_reject(bundle length)");
-            throw std::invalid_argument("client requested an invalid replica bundle length");
-        }
-        if (requested_target != node_id) {
-            Check(rdma_reject(resources.id, nullptr, 0), "rdma_reject(target node)");
-            throw std::invalid_argument("client connected to the wrong target memory node");
+        if (staging_bytes == 0 || staging_bytes > maximum_bundle_bytes ||
+            requested_target != node_id) {
+            Check(rdma_reject(resources.id, nullptr, 0), "rdma_reject(session request)");
+            std::cerr << "replica_session_rejected node=" << node_id
+                      << " requested_target=" << requested_target
+                      << " staging_bytes=" << staging_bytes << std::endl;
+            continue;
         }
 
-        CreateQueuePair(resources, bytes, true);
+        CreateQueuePair(resources, staging_bytes, true);
         PostReceive(resources);
         MemoryDescriptor descriptor{};
+        descriptor.magic_be = htonl(kDescriptorMagic);
+        descriptor.version_be = htonl(kProtocolVersion);
         descriptor.address_be = htobe64(static_cast<std::uint64_t>(
             reinterpret_cast<std::uintptr_t>(resources.data.data())));
         descriptor.rkey_be = htonl(resources.data_mr->rkey);
-        descriptor.length_be = htonl(static_cast<std::uint32_t>(resources.data.size()));
+        descriptor.length_be = htonl(static_cast<std::uint32_t>(staging_bytes));
+        descriptor.target_node_be = htonl(static_cast<std::uint32_t>(node_id));
         rdma_conn_param connection{};
         connection.private_data = &descriptor;
         connection.private_data_len = sizeof(descriptor);
@@ -598,82 +713,148 @@ void RunRdmaReplicaServer(std::uint16_t port,
         connection.initiator_depth = 1;
         connection.retry_count = 7;
         Check(rdma_accept(resources.id, &connection), "rdma_accept");
-        rdma_cm_event* established = WaitEvent(channel.value, RDMA_CM_EVENT_ESTABLISHED);
+        rdma_cm_event* established =
+            WaitEvent(channel.value, RDMA_CM_EVENT_ESTABLISHED);
         Check(rdma_ack_cm_event(established), "rdma_ack_cm_event(server established)");
+        ++session_count;
+        std::cout << "replica_session_established node=" << node_id
+                  << " session=" << session_count
+                  << " staging_bytes=" << staging_bytes << std::endl;
 
-        const ibv_wc completion =
-            WaitCompletion(channel.value, resources.receive_cq, 1, IBV_WC_RECV);
-        TransferStatus status = TransferStatus::kSuccess;
-        std::string failure_reason;
-        ReplicaBundle decoded;
-        const std::size_t reported_bytes = ntohl(resources.receive_control.length_be);
-        if (completion.byte_len != sizeof(ControlMessage) ||
-            ntohl(resources.receive_control.magic_be) != kDoneMagic ||
-            ntohl(resources.receive_control.status_be) != 0 ||
-            ntohl(resources.receive_control.bucket_id_be) != requested_bucket) {
-            status = TransferStatus::kInvalidControl;
-            failure_reason = "invalid completion control message";
-        } else if (reported_bytes != bytes) {
-            status = TransferStatus::kLengthMismatch;
-            failure_reason = "client reported a different bundle length";
-        } else if (ntohl(resources.receive_control.checksum_be) != requested_checksum ||
-                   ReplicaBundleChecksum(resources.data) != requested_checksum) {
-            status = TransferStatus::kChecksumMismatch;
-            failure_reason = "received replica bytes failed checksum validation";
-        } else {
+        std::uint64_t expected_sequence = 1;
+        bool peer_disconnected = false;
+        while (maximum_replications == 0 || attempts < maximum_replications) {
+            ibv_wc completion{};
             try {
-                decoded = DecodeReplicaBundle(resources.data);
-                if (decoded.bucket_id != requested_bucket) {
-                    status = TransferStatus::kInvalidBundle;
-                    failure_reason = "bundle bucket does not match its request";
-                } else if (decoded.target_node != node_id) {
-                    status = TransferStatus::kWrongTarget;
-                    failure_reason = "bundle target does not match this memory node";
+                completion = WaitCompletion(
+                    channel.value, resources.receive_cq, 1, IBV_WC_RECV);
+            } catch (const PeerDisconnected&) {
+                peer_disconnected = true;
+                break;
+            }
+            ++attempts;
+
+            const std::uint64_t sequence =
+                be64toh(resources.receive_control.sequence_be);
+            const std::size_t reported_bytes =
+                ntohl(resources.receive_control.length_be);
+            const std::size_t requested_bucket =
+                ntohl(resources.receive_control.bucket_id_be);
+            const std::size_t control_target =
+                ntohl(resources.receive_control.target_node_be);
+            const std::uint32_t requested_checksum =
+                ntohl(resources.receive_control.checksum_be);
+
+            TransferStatus status = TransferStatus::kSuccess;
+            std::string failure_reason;
+            ReplicaBundle decoded;
+            std::vector<std::uint8_t> received;
+            if (completion.byte_len != sizeof(ControlMessage) ||
+                ntohl(resources.receive_control.magic_be) != kDoneMagic ||
+                ntohl(resources.receive_control.version_be) != kProtocolVersion ||
+                ntohl(resources.receive_control.status_be) != 0) {
+                status = TransferStatus::kInvalidControl;
+                failure_reason = "invalid completion control message";
+            } else if (sequence != expected_sequence) {
+                status = TransferStatus::kInvalidSequence;
+                failure_reason = "expected sequence " +
+                                 std::to_string(expected_sequence) +
+                                 ", received " + std::to_string(sequence);
+            } else if (reported_bytes == 0 || reported_bytes > staging_bytes) {
+                status = TransferStatus::kLengthMismatch;
+                failure_reason = "reported bundle length exceeds the staging buffer";
+            } else if (control_target != node_id) {
+                status = TransferStatus::kWrongTarget;
+                failure_reason = "control target does not match this memory node";
+            } else {
+                received.assign(
+                    resources.data.begin(),
+                    resources.data.begin() + static_cast<std::ptrdiff_t>(reported_bytes));
+                if (ReplicaBundleChecksum(received) != requested_checksum) {
+                    status = TransferStatus::kChecksumMismatch;
+                    failure_reason = "received replica bytes failed checksum validation";
+                } else {
+                    try {
+                        decoded = DecodeReplicaBundle(received);
+                        if (decoded.bucket_id != requested_bucket) {
+                            status = TransferStatus::kInvalidBundle;
+                            failure_reason = "bundle bucket does not match its control message";
+                        } else if (decoded.target_node != node_id) {
+                            status = TransferStatus::kWrongTarget;
+                            failure_reason = "bundle target does not match this memory node";
+                        }
+                    } catch (const std::exception& error) {
+                        status = TransferStatus::kInvalidBundle;
+                        failure_reason = error.what();
+                    }
                 }
-            } catch (const std::exception& error) {
-                status = TransferStatus::kInvalidBundle;
-                failure_reason = error.what();
+            }
+
+            if (sequence == expected_sequence) {
+                ++expected_sequence;
+            }
+            if (status == TransferStatus::kSuccess) {
+                replicas[decoded.bucket_id] = StoredReplica{
+                    decoded,
+                    std::move(received),
+                    ++generation,
+                    sequence,
+                };
+            }
+
+            resources.send_control = ControlMessage{};
+            resources.send_control.magic_be = htonl(kAckMagic);
+            resources.send_control.version_be = htonl(kProtocolVersion);
+            resources.send_control.sequence_be = htobe64(sequence);
+            resources.send_control.length_be =
+                htonl(static_cast<std::uint32_t>(reported_bytes));
+            resources.send_control.bucket_id_be =
+                htonl(static_cast<std::uint32_t>(requested_bucket));
+            resources.send_control.target_node_be =
+                htonl(static_cast<std::uint32_t>(node_id));
+            resources.send_control.checksum_be = htonl(requested_checksum);
+            resources.send_control.status_be =
+                htonl(static_cast<std::uint32_t>(status));
+            PostControl(resources, 4);
+            WaitCompletion(channel.value, resources.send_cq, 4, IBV_WC_SEND);
+
+            if (status == TransferStatus::kSuccess) {
+                const auto& stored = replicas.at(requested_bucket);
+                std::cout << "replica_committed bucket=" << requested_bucket
+                          << " target_node=" << node_id
+                          << " sequence=" << sequence
+                          << " records=" << stored.bundle.records.size()
+                          << " bytes=" << stored.encoded.size()
+                          << " expires_after_window="
+                          << stored.bundle.expires_after_window
+                          << " generation=" << stored.generation << std::endl;
+            } else {
+                std::cerr << "replica_rejected bucket=" << requested_bucket
+                          << " target_node=" << node_id
+                          << " sequence=" << sequence
+                          << " status=" << StatusName(status)
+                          << " reason=" << failure_reason << std::endl;
+            }
+
+            if (maximum_replications == 0 || attempts < maximum_replications) {
+                PostReceive(resources);
             }
         }
 
-        if (status == TransferStatus::kSuccess) {
-            auto committed_bytes = resources.ReleaseRegisteredData();
-            replicas[decoded.bucket_id] = StoredReplica{
-                decoded,
-                std::move(committed_bytes),
-                ++generation,
-            };
+        if (!peer_disconnected) {
+            rdma_cm_event* disconnected =
+                WaitEvent(channel.value, RDMA_CM_EVENT_DISCONNECTED);
+            Check(rdma_ack_cm_event(disconnected),
+                  "rdma_ack_cm_event(server disconnected)");
         }
-
-        resources.send_control.magic_be = htonl(kAckMagic);
-        resources.send_control.length_be = htonl(static_cast<std::uint32_t>(bytes));
-        resources.send_control.status_be = htonl(static_cast<std::uint32_t>(status));
-        resources.send_control.bucket_id_be =
-            htonl(static_cast<std::uint32_t>(requested_bucket));
-        resources.send_control.checksum_be = htonl(requested_checksum);
-        PostControl(resources, 4);
-        WaitCompletion(channel.value, resources.send_cq, 4, IBV_WC_SEND);
-        rdma_cm_event* disconnected = WaitEvent(channel.value, RDMA_CM_EVENT_DISCONNECTED);
-        Check(rdma_ack_cm_event(disconnected), "rdma_ack_cm_event(disconnected)");
-
-        if (status == TransferStatus::kSuccess) {
-            const auto& stored = replicas.at(requested_bucket);
-            std::cout << "replica_committed bucket=" << requested_bucket
-                      << " target_node=" << node_id
-                      << " records=" << stored.bundle.records.size()
-                      << " bytes=" << stored.encoded.size()
-                      << " expires_after_window=" << stored.bundle.expires_after_window
-                      << " generation=" << stored.generation << std::endl;
-        } else {
-            std::cerr << "replica_rejected bucket=" << requested_bucket
-                      << " target_node=" << node_id
-                      << " status=" << StatusName(status)
-                      << " reason=" << failure_reason << std::endl;
-        }
+        std::cout << "replica_session_closed node=" << node_id
+                  << " session=" << session_count
+                  << " next_sequence=" << expected_sequence << std::endl;
     }
 
     std::cout << "replica_server_complete node=" << node_id
               << " attempts=" << attempts
+              << " sessions=" << session_count
               << " stored_buckets=" << replicas.size() << std::endl;
 }
 

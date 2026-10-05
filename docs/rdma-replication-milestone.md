@@ -1,6 +1,6 @@
 # RDMA bucket-replication milestone
 
-Run date: 2026-10-04
+Last updated: 2026-10-05
 
 ## What is now implemented
 
@@ -10,9 +10,15 @@ target node, replica expiry window, entity IDs, source nodes, serialized lengths
 the actual allocation bytes, and a checksum.
 
 The compute process sends the bundle to a logical memory-node service through a one-sided
-`IBV_WR_RDMA_WRITE`. The service checks the control message, byte length, checksum, bundle structure,
-bucket ID, and target node. It moves the validated registered buffer into its replica store before
-returning an ACK. The simulator updates its read-routing state only after that ACK.
+`IBV_WR_RDMA_WRITE`. One persistent session per target node keeps its RC QP and 8 MiB local/remote
+staging buffers registered for the whole policy run. Every DONE and ACK carries a 64-bit sequence
+number. The service checks the sequence, byte length, checksum, bundle structure, bucket ID, and
+target node before committing the replica. The simulator updates read routing only after that ACK.
+
+The connection lifecycle follows the repeated-operation pattern in the official
+[`rdma-core` rping example](https://github.com/linux-rdma/rdma-core/blob/master/librdmacm/examples/rping.c):
+keep the QP established, process multiple work completions, and post the next receive after the
+previous receive completes. The project protocol and storage logic are independent implementations.
 
 ## Verification performed
 
@@ -23,6 +29,8 @@ returning an ACK. The simulator updates its read-routing state only after that A
 - Valgrind reported zero errors and zero definitely/indirectly lost bytes on both endpoints.
 - Strict warnings with `-Werror` and GCC static analysis completed successfully.
 - Portable C++ tests, Python model tests, and the React production build passed.
+- One session committed the same bucket with sequences 1, 2, and 3, then disconnected cleanly.
+- A wrong-target session was rejected; the server remained available for a valid client.
 
 ## Frozen-LSTM integration result
 
@@ -37,11 +45,20 @@ logical target services.
 | Existing policy cost estimate | 2.747 ms |
 | Bundle size range | 448-960 bytes |
 
-The result verifies the model-to-policy-to-RDMA path. It is not yet a final performance result. The
-current transport creates one CM/QP connection for every copy, so end-to-end time includes setup.
-The ten visible entities also produce sub-kilobyte physical bundles, whereas earlier simulations
-assumed a 4 MiB logical bucket. Formal claims require persistent connections and matching the real
-payload size to the cost model.
+These values were collected before persistent sessions and remain the comparison baseline.
+
+## Persistent-session result
+
+A single connection copied the same 576-byte bucket three times with sequences 1-3. Connection and
+memory-registration setup took 11.236 ms once. Per-copy end-to-end times were 2.727, 2.025, and
+1.720 ms; the mean was 2.157 ms. The previous per-copy-connection mean was 6.142 ms. This is a useful
+engineering result, not a hardware-RDMA claim, because RXE still executes the RDMA stack in software.
+
+The integrated five-node recent-window run established five sessions once and completed two copies
+at 2.858 and 3.511 ms. Each target maintains its own sequence stream. The ten visible entities still
+produce sub-kilobyte physical bundles, whereas earlier simulations assumed a 4 MiB logical bucket.
+Formal claims require matching payload size and cost-model assumptions and repeating measurements
+on physical RNICs.
 
 ## LSTM training decision
 

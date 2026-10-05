@@ -109,7 +109,7 @@ expiry window, and a checksum. Start logical memory node 0 on the memory VM:
 
 ```bash
 ./build-rdma/hotbucket_rdma_replica server \
-  --port 7600 --node-id 0 --max-replications 1
+  --port 7600 --node-id 0 --max-replications 3
 ```
 
 Replicate bucket 43 from the ten-entity scenario on the compute VM:
@@ -117,23 +117,24 @@ Replicate bucket 43 from the ten-entity scenario on the compute VM:
 ```bash
 ./build-rdma/hotbucket_rdma_replica client \
   --server 192.168.64.128 --port 7600 \
-  --bucket 43 --target-node 0 --expires-after-window 7
+  --bucket 43 --target-node 0 --expires-after-window 7 --repeat 3
 ```
 
-The client performs `IBV_WR_RDMA_WRITE`. The server decodes the received bucket, verifies its exact
-length and checksum, moves the registered bytes into its replica store, and only then sends an ACK.
+The client establishes one RC connection, registers an 8 MiB staging buffer once, and performs
+three `IBV_WR_RDMA_WRITE` operations on the same QP. The server verifies each bucket and only then
+returns an ACK carrying the matching 64-bit sequence number. Expected sequences are `1`, `2`, and
+`3` in both logs.
 For a policy run, start one service per logical target node with
 `scripts/start_rdma_replica_nodes.sh`. Port `7600 + node_id` identifies the target node.
 
-The current service establishes one RC connection per copy. This makes the implementation easy to
-validate, but its `rdma_end_to_end_ms` includes CM/QP setup. `rdma_write_ms` records only the WRITE
-completion interval. Persistent connections are the next transport optimization and should be
-implemented before treating Soft-RoCE end-to-end time as a steady-state copy cost.
+The policy runner opens one persistent session to every target before processing workload windows.
+Each session reuses its CM connection, QP, completion queues, and local/remote registered buffers.
+`rdma_write_ms` records the WRITE completion interval; `rdma_end_to_end_ms` adds bundle validation
+and DONE/ACK but excludes one-time setup. `rdma_sequence` identifies the operation within that
+target-node session.
 
 ## Relation to the simulator
 
-This probe is the first transport milestone, not yet the complete distributed KV store. Its measured
-bandwidth and metadata/control latency can replace the simulator's assumed copy parameters. The next
-transport step is to place the same operations behind a `BucketCopyTransport` interface so a policy
-decision can choose either simulated copy or RDMA WRITE without changing the LSTM or replication
-logic.
+This remains a prototype transport rather than a complete distributed KV store. It has persistent
+copy sessions, but remote replica expiry and an actual RDMA READ path are not yet connected. RXE
+measurements are useful for software-cost calibration; final latency claims still require RNICs.

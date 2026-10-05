@@ -2,6 +2,7 @@
 #include "hotbucket/rdma_replication.hpp"
 #include "hotbucket/replica_bundle.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -24,6 +25,8 @@ struct Options {
     std::size_t bucket_count{64};
     std::size_t node_count{5};
     std::size_t node_memory_bytes{2048};
+    std::size_t staging_bytes{hotbucket::kDefaultRdmaStagingBytes};
+    std::size_t repeat_count{1};
 };
 
 std::string RequireValue(int& index, int argc, char** argv) {
@@ -71,7 +74,7 @@ void PrintUsage() {
         << "Client options:\n"
         << "  --server IP --port N --bucket N --target-node N\n"
         << "  --expires-after-window N --entities N --buckets N --nodes N\n"
-        << "  --node-memory-bytes N\n";
+        << "  --node-memory-bytes N --staging-bytes N --repeat N\n";
 }
 
 Options ParseArguments(int argc, char** argv) {
@@ -112,6 +115,11 @@ Options ParseArguments(int argc, char** argv) {
         } else if (argument == "--node-memory-bytes") {
             options.node_memory_bytes =
                 ParseSize(RequireValue(index, argc, argv), "node-memory-bytes");
+        } else if (argument == "--staging-bytes") {
+            options.staging_bytes =
+                ParseSize(RequireValue(index, argc, argv), "staging-bytes");
+        } else if (argument == "--repeat") {
+            options.repeat_count = ParseSize(RequireValue(index, argc, argv), "repeat");
         } else if (argument == "--help") {
             PrintUsage();
             std::exit(0);
@@ -148,15 +156,30 @@ int main(int argc, char** argv) {
                 options.target_node,
                 options.expires_after_window);
             const auto encoded = hotbucket::EncodeReplicaBundle(bundle);
-            const auto result = hotbucket::ReplicateBundleRdma(
-                options.server_ip, options.port, encoded);
-            std::cout << "replication_complete bucket=" << result.bucket_id
-                      << " target_node=" << result.target_node
-                      << " records=" << bundle.records.size()
-                      << " bytes=" << result.transferred_bytes
-                      << " write_completion_ms=" << result.write_completion_ms
-                      << " end_to_end_ms=" << result.end_to_end_ms
-                      << " provider=" << result.provider << '\n';
+            if (options.repeat_count == 0) {
+                throw std::invalid_argument("repeat must be positive");
+            }
+            hotbucket::RdmaReplicaSession session(
+                options.server_ip,
+                options.port,
+                options.target_node,
+                std::max(options.staging_bytes, encoded.size()));
+            std::cout << "replica_session_connected target_node="
+                      << options.target_node
+                      << " staging_bytes=" << session.staging_bytes()
+                      << " setup_ms=" << session.setup_ms() << '\n';
+            for (std::size_t iteration = 0; iteration < options.repeat_count;
+                 ++iteration) {
+                const auto result = session.Replicate(encoded);
+                std::cout << "replication_complete bucket=" << result.bucket_id
+                          << " target_node=" << result.target_node
+                          << " sequence=" << result.sequence_number
+                          << " records=" << bundle.records.size()
+                          << " bytes=" << result.transferred_bytes
+                          << " write_completion_ms=" << result.write_completion_ms
+                          << " end_to_end_ms=" << result.end_to_end_ms
+                          << " provider=" << result.provider << '\n';
+            }
         } else {
             throw std::invalid_argument("mode must be server or client");
         }

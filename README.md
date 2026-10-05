@@ -25,7 +25,8 @@ window-level demand without allowing a balancing policy to alter the training tr
 - Frozen prediction replay with copy cost, measured inference overhead, and paired comparisons
 - Versioned bucket bundles containing real entity bytes, allocation boundaries, TTL, and checksum
 - RDMA replica services that validate and commit bucket bundles before returning an ACK
-- An RDMA-enabled simulator that records WRITE time separately from end-to-end replication time
+- Persistent RDMA sessions with one long-lived QP and registered staging buffer per target node
+- Sequence-checked DONE/ACK messages and separate WRITE/end-to-end replication telemetry
 
 The trained LSTM is connected to the replication policy through a prediction CSV. The normal
 `hotbucket_sim` keeps the deterministic local copy path. On Linux, `hotbucket_rdma_sim` sends every
@@ -209,8 +210,10 @@ Then run a policy on the compute VM with real RDMA copies:
   --output results/recent-window-rdma.csv
 ```
 
-The output CSV distinguishes pure `rdma_write_ms` from `rdma_end_to_end_ms`, which also includes
-the current per-copy connection and validation overhead.
+The simulator establishes all target-node sessions once before the window loop. The output CSV
+distinguishes pure `rdma_write_ms` from steady-state `rdma_end_to_end_ms` and records the
+per-session `rdma_sequence`. CM/QP setup is measured by the standalone client, not charged to every
+bucket copy.
 
 With the dashboard running, verify the SSE and dynamic-memory path with:
 
@@ -235,10 +238,10 @@ third_party/         External research artifacts as Git submodules
 
 ## Next implementation milestones
 
-1. Create a new validation-only model experiment for the cases where LSTM misses abrupt changes;
-   do not tune against the consumed formal test interval.
-2. Reuse persistent RDMA connections so every bucket copy does not create a new CM/QP session.
-3. Calibrate copy, metadata, and request service costs on physical RDMA hardware.
+1. Send replica-expiry commands to the remote service so physical and simulated lifetimes match.
+2. Calibrate copy, metadata, and request service costs on physical RDMA hardware.
+3. Create a validation-only model experiment for abrupt hotspots; do not tune against the consumed
+   formal test interval.
 4. Generate a new untouched test corpus and repeat the primary comparison after calibration.
 
 ## Research rule

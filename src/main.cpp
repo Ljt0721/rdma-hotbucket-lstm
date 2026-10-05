@@ -1,17 +1,17 @@
 #include "hotbucket/cluster.hpp"
 #include "hotbucket/entity_memory.hpp"
 #include "hotbucket/policies.hpp"
+#include "hotbucket/rdma_replication.hpp"
 #include "hotbucket/workload.hpp"
 
-#ifdef HOTBUCKET_HAS_RDMA
-#include "hotbucket/rdma_replication.hpp"
-#endif
-
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -36,6 +36,7 @@ struct CommandLine {
     double lstm_inference_cost_ms{0.0};
     std::string rdma_server;
     std::uint16_t rdma_port_base{7600};
+    std::size_t rdma_staging_bytes{hotbucket::kDefaultRdmaStagingBytes};
     bool stream_json{false};
     bool placement_only{false};
     bool trace_only{false};
@@ -123,6 +124,9 @@ CommandLine ParseArguments(int argc, char** argv) {
                 throw std::invalid_argument("rdma-port-base must be between 1 and 65535");
             }
             command.rdma_port_base = static_cast<std::uint16_t>(port);
+        } else if (argument == "--rdma-staging-bytes") {
+            command.rdma_staging_bytes =
+                std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--stream-json") {
             command.stream_json = true;
         } else if (argument == "--placement-only") {
@@ -145,7 +149,7 @@ CommandLine ParseArguments(int argc, char** argv) {
                 << "  --lstm-min-predicted-get-ratio R\n"
                 << "  --lstm-inference-cost-ms R\n"
                 << "  --evaluation-start-window N\n"
-                << "  --rdma-server IPv4 --rdma-port-base N\n"
+                << "  --rdma-server IPv4 --rdma-port-base N --rdma-staging-bytes N\n"
                 << "  --window-seconds N --window-delay-ms N\n"
                 << "  --output path/to/result.csv\n";
             std::exit(0);
@@ -244,7 +248,7 @@ void WriteHeader(std::ofstream& output) {
               "control_overhead_ms,"
               "decision_bucket,predicted_gets,hotspot_probability,"
               "expected_benefit_ms,expected_cost_ms,"
-              "rdma_copy,copied_bytes,rdma_write_ms,rdma_end_to_end_ms\n";
+              "rdma_copy,copied_bytes,rdma_sequence,rdma_write_ms,rdma_end_to_end_ms\n";
 }
 
 void WriteWindow(std::ofstream& output,
@@ -278,6 +282,7 @@ void WriteWindow(std::ofstream& output,
         }
         output << ',' << (decision_for_bucket && result.rdma_copy ? 1 : 0) << ','
                << (decision_for_bucket ? result.copied_bytes : 0) << ','
+               << (decision_for_bucket ? result.rdma_sequence : 0) << ','
                << (decision_for_bucket ? result.rdma_write_ms : 0.0) << ','
                << (decision_for_bucket ? result.rdma_end_to_end_ms : 0.0);
         output << '\n';
@@ -419,6 +424,7 @@ void StreamWindowJson(const std::string& policy,
               << ",\"copyCostMs\":" << result.copy_cost_ms
               << ",\"rdmaCopy\":" << (result.rdma_copy ? "true" : "false")
               << ",\"copiedBytes\":" << result.copied_bytes
+              << ",\"rdmaSequence\":" << result.rdma_sequence
               << ",\"rdmaWriteMs\":" << result.rdma_write_ms
               << ",\"rdmaEndToEndMs\":" << result.rdma_end_to_end_ms
               << ",\"controlOverheadMs\":" << result.control_overhead_ms
@@ -527,8 +533,30 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument(
                     "rdma-port-base plus the highest node ID exceeds 65535");
             }
+            if (command.rdma_staging_bytes == 0 ||
+                command.rdma_staging_bytes >
+                    std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument(
+                    "rdma-staging-bytes is outside the protocol limit");
+            }
 #endif
         }
+#ifdef HOTBUCKET_HAS_RDMA
+        std::vector<std::unique_ptr<hotbucket::RdmaReplicaSession>> rdma_sessions;
+        if (!command.rdma_server.empty()) {
+            rdma_sessions.reserve(command.config.node_count);
+            for (std::size_t node = 0; node < command.config.node_count; ++node) {
+                const auto port = static_cast<std::uint16_t>(
+                    static_cast<std::size_t>(command.rdma_port_base) + node);
+                rdma_sessions.push_back(
+                    std::make_unique<hotbucket::RdmaReplicaSession>(
+                        command.rdma_server,
+                        port,
+                        node,
+                        command.rdma_staging_bytes));
+            }
+        }
+#endif
         std::vector<hotbucket::LstmBucketPrediction> lstm_predictions;
         if (command.policy == "lstm") {
             if (command.prediction_file.empty()) {
@@ -579,6 +607,7 @@ int main(int argc, char** argv) {
             bool copy_applied = false;
             bool rdma_copy = false;
             std::size_t copied_bytes = 0;
+            std::uint64_t rdma_sequence = 0;
             double rdma_write_ms = 0.0;
             double rdma_end_to_end_ms = 0.0;
             if (decision.has_value()) {
@@ -591,14 +620,12 @@ int main(int argc, char** argv) {
                         const auto bundle = memory_cluster.BuildReplicaBundle(
                             decision->bucket_id, decision->target_node, expires_after);
                         const auto encoded = hotbucket::EncodeReplicaBundle(bundle);
-                        const auto target_port = static_cast<std::uint16_t>(
-                            static_cast<std::size_t>(command.rdma_port_base) +
-                            decision->target_node);
-                        const auto transfer = hotbucket::ReplicateBundleRdma(
-                            command.rdma_server, target_port, encoded);
+                        const auto transfer = rdma_sessions.at(decision->target_node)
+                                                  ->Replicate(encoded);
                         measured_rdma_cost_ms = transfer.end_to_end_ms;
                         rdma_copy = true;
                         copied_bytes = transfer.transferred_bytes;
+                        rdma_sequence = transfer.sequence_number;
                         rdma_write_ms = transfer.write_completion_ms;
                         rdma_end_to_end_ms = transfer.end_to_end_ms;
                     }
@@ -633,6 +660,7 @@ int main(int argc, char** argv) {
             result.copy_applied = copy_applied;
             result.rdma_copy = rdma_copy;
             result.copied_bytes = copied_bytes;
+            result.rdma_sequence = rdma_sequence;
             result.rdma_write_ms = rdma_write_ms;
             result.rdma_end_to_end_ms = rdma_end_to_end_ms;
             if (window >= command.evaluation_start_window) {
