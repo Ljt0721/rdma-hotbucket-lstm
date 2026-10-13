@@ -14,6 +14,8 @@ window-level demand without allowing a balancing policy to alter the training tr
 - Moving, read-heavy hotspots
 - Multiple simulated memory nodes
 - Ten battlefield entities serialized into five independent byte-addressed node pools
+- A durable HBKV file containing complete `EntityID -> entity attributes` records
+- REST endpoints to create, read, update, and delete entities by `EntityID`
 - Browser view of each entity's node, hash bucket, memory offset, allocation size, and attributes
 - Temporary bucket replicas backed by copied entity bytes, TTL reclamation, and GET read splitting
 - Write-amplification and configurable copy-cost model
@@ -163,6 +165,27 @@ The dashboard streams each completed window through a local Server-Sent Events e
 displays logical node load, hot-bucket movement, GET/PUT activity, copy decisions, and the
 `EntityID -> bucket -> node -> memory offset` placement for ten battlefield entities. Temporary
 copies occupy new byte ranges, show their expiry window, and disappear when their TTL ends.
+
+The default entity records are stored in `data/entity-store/entities.hbkv`. The file is the durable
+primary snapshot: each value contains the complete entity type, callsign, and typed attribute map.
+At the beginning of a run, C++ loads these exact serialized values into the node memory pools. An
+accepted copy decision sends the same bytes to a remote replica buffer. Disk persistence is kept
+outside the request path; the active simulation and RDMA replication operate on memory.
+
+The dashboard includes an **Entity KV store** panel. It can query a record by `EntityID` and create
+a Tank record that appears in the next memory-placement snapshot. The same operations are also
+available through the API:
+
+```text
+GET    /api/kv/entities
+GET    /api/kv/entities/1002
+POST   /api/kv/entities
+PUT    /api/kv/entities/1002
+DELETE /api/kv/entities/1002
+```
+
+The current query endpoint reads the durable primary store. RDMA replicas are validated and held
+in the remote service's memory for the run, but that service does not yet expose a remote GET API.
 
 The **Local simulation** mode runs the Windows mathematical simulator. The **Real RDMA** mode uses
 SSH to control the two Ubuntu VMs, starts one persistent Soft-RoCE replica service for each logical

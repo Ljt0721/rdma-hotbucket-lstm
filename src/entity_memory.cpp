@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace hotbucket {
@@ -28,6 +31,63 @@ void AppendString(std::vector<std::uint8_t>& output, const std::string& value) {
     }
     AppendUint32(output, static_cast<std::uint32_t>(value.size()));
     output.insert(output.end(), value.begin(), value.end());
+}
+
+std::uint32_t ReadUint32(const std::vector<std::uint8_t>& input,
+                         std::size_t& offset) {
+    if (offset + sizeof(std::uint32_t) > input.size()) {
+        throw std::invalid_argument("serialized entity ends inside a uint32 field");
+    }
+    std::uint32_t value = 0;
+    for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
+        value |= static_cast<std::uint32_t>(input[offset + byte]) << (byte * 8U);
+    }
+    offset += sizeof(value);
+    return value;
+}
+
+std::uint64_t ReadUint64(const std::vector<std::uint8_t>& input,
+                         std::size_t& offset) {
+    if (offset + sizeof(std::uint64_t) > input.size()) {
+        throw std::invalid_argument("serialized entity ends inside a uint64 field");
+    }
+    std::uint64_t value = 0;
+    for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
+        value |= static_cast<std::uint64_t>(input[offset + byte]) << (byte * 8U);
+    }
+    offset += sizeof(value);
+    return value;
+}
+
+std::string ReadString(const std::vector<std::uint8_t>& input,
+                       std::size_t& offset) {
+    const auto length = static_cast<std::size_t>(ReadUint32(input, offset));
+    if (length > input.size() - offset) {
+        throw std::invalid_argument("serialized entity string exceeds its payload");
+    }
+    const auto begin = input.begin() + static_cast<std::ptrdiff_t>(offset);
+    std::string value(begin, begin + static_cast<std::ptrdiff_t>(length));
+    offset += length;
+    return value;
+}
+
+std::vector<std::uint8_t> ReadBinaryFile(const std::string& path) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        throw std::runtime_error("cannot open entity store: " + path);
+    }
+    const auto end = input.tellg();
+    if (end < 0) {
+        throw std::runtime_error("cannot determine entity store size: " + path);
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
+    input.seekg(0, std::ios::beg);
+    if (!bytes.empty() &&
+        !input.read(reinterpret_cast<char*>(bytes.data()),
+                    static_cast<std::streamsize>(bytes.size()))) {
+        throw std::runtime_error("cannot read entity store: " + path);
+    }
+    return bytes;
 }
 
 std::size_t AlignUp(std::size_t value, std::size_t alignment) {
@@ -63,6 +123,127 @@ std::vector<std::uint8_t> SerializeEntity(const BattlefieldEntity& entity) {
         AppendString(output, attribute.value);
     }
     return output;
+}
+
+BattlefieldEntity DeserializeEntity(const std::vector<std::uint8_t>& serialized) {
+    std::size_t offset = 0;
+    BattlefieldEntity entity;
+    entity.entity_id = ReadUint64(serialized, offset);
+    entity.callsign = ReadString(serialized, offset);
+    entity.entity_type = ReadString(serialized, offset);
+    const auto attribute_count = static_cast<std::size_t>(ReadUint32(serialized, offset));
+    if (attribute_count > (serialized.size() - offset) / 12) {
+        throw std::invalid_argument("serialized entity declares too many attributes");
+    }
+    entity.attributes.reserve(attribute_count);
+    std::unordered_set<std::string> attribute_names;
+    for (std::size_t index = 0; index < attribute_count; ++index) {
+        EntityAttribute attribute{
+            ReadString(serialized, offset),
+            ReadString(serialized, offset),
+            ReadString(serialized, offset),
+        };
+        if (attribute.name.empty() || !attribute_names.insert(attribute.name).second) {
+            throw std::invalid_argument(
+                "serialized entity contains an empty or duplicate attribute key");
+        }
+        entity.attributes.push_back(std::move(attribute));
+    }
+    if (offset != serialized.size()) {
+        throw std::invalid_argument("serialized entity contains trailing bytes");
+    }
+    if (entity.entity_id == 0 || entity.callsign.empty() || entity.entity_type.empty()) {
+        throw std::invalid_argument("serialized entity is missing required fields");
+    }
+    return entity;
+}
+
+std::vector<BattlefieldEntity> LoadEntityStore(const std::string& path,
+                                               std::size_t maximum_entities) {
+    constexpr std::size_t header_bytes = 12;
+    constexpr std::uint32_t format_version = 1;
+    const auto encoded = ReadBinaryFile(path);
+    if (encoded.size() < header_bytes || encoded[0] != 'H' || encoded[1] != 'B' ||
+        encoded[2] != 'K' || encoded[3] != 'V') {
+        throw std::invalid_argument("entity store has an invalid HBKV header");
+    }
+    std::size_t offset = 4;
+    if (ReadUint32(encoded, offset) != format_version) {
+        throw std::invalid_argument("entity store version is not supported");
+    }
+    const auto record_count = static_cast<std::size_t>(ReadUint32(encoded, offset));
+    if (record_count == 0) {
+        throw std::invalid_argument("entity store contains no records");
+    }
+
+    std::vector<BattlefieldEntity> entities;
+    entities.reserve(maximum_entities == 0
+                         ? record_count
+                         : std::min(record_count, maximum_entities));
+    std::unordered_set<std::uint64_t> entity_ids;
+    for (std::size_t index = 0; index < record_count; ++index) {
+        const auto stored_id = ReadUint64(encoded, offset);
+        const auto payload_bytes = static_cast<std::size_t>(ReadUint32(encoded, offset));
+        if (payload_bytes > encoded.size() - offset) {
+            throw std::invalid_argument("entity store record exceeds the file length");
+        }
+        const auto begin = encoded.begin() + static_cast<std::ptrdiff_t>(offset);
+        std::vector<std::uint8_t> payload(
+            begin, begin + static_cast<std::ptrdiff_t>(payload_bytes));
+        offset += payload_bytes;
+        auto entity = DeserializeEntity(payload);
+        if (entity.entity_id != stored_id || !entity_ids.insert(stored_id).second) {
+            throw std::invalid_argument("entity store contains a mismatched or duplicate key");
+        }
+        if (maximum_entities == 0 || entities.size() < maximum_entities) {
+            entities.push_back(std::move(entity));
+        }
+    }
+    if (offset != encoded.size()) {
+        throw std::invalid_argument("entity store contains trailing bytes");
+    }
+    if (entities.size() < 2) {
+        throw std::invalid_argument("at least two stored entities are required");
+    }
+    std::sort(entities.begin(), entities.end(), [](const auto& left, const auto& right) {
+        return left.entity_id < right.entity_id;
+    });
+    return entities;
+}
+
+void SaveEntityStore(const std::string& path,
+                     const std::vector<BattlefieldEntity>& entities) {
+    constexpr std::uint32_t format_version = 1;
+    if (entities.empty() || entities.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("entity store requires a valid non-empty record set");
+    }
+    std::vector<std::uint8_t> encoded{'H', 'B', 'K', 'V'};
+    AppendUint32(encoded, format_version);
+    AppendUint32(encoded, static_cast<std::uint32_t>(entities.size()));
+    std::unordered_set<std::uint64_t> entity_ids;
+    for (const auto& entity : entities) {
+        if (entity.entity_id == 0 || !entity_ids.insert(entity.entity_id).second) {
+            throw std::invalid_argument("entity store keys must be nonzero and unique");
+        }
+        const auto payload = SerializeEntity(entity);
+        if (payload.size() > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::length_error("serialized entity exceeds the store format limit");
+        }
+        AppendUint64(encoded, entity.entity_id);
+        AppendUint32(encoded, static_cast<std::uint32_t>(payload.size()));
+        encoded.insert(encoded.end(), payload.begin(), payload.end());
+    }
+
+    const std::filesystem::path output_path(path);
+    if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path());
+    }
+    std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
+    if (!output ||
+        !output.write(reinterpret_cast<const char*>(encoded.data()),
+                      static_cast<std::streamsize>(encoded.size()))) {
+        throw std::runtime_error("cannot write entity store: " + path);
+    }
 }
 
 std::vector<BattlefieldEntity> MakeBattlefieldScenario(std::size_t entity_count) {

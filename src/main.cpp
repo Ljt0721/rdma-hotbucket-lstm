@@ -24,6 +24,8 @@ struct CommandLine {
     hotbucket::SimulationConfig config;
     std::string policy{"no-action"};
     std::string output{"results/run.csv"};
+    std::string entity_store;
+    std::string initialize_entity_store;
     std::size_t severe_get_threshold{1200};
     std::size_t window_delay_ms{0};
     std::size_t node_memory_bytes{2048};
@@ -57,6 +59,10 @@ CommandLine ParseArguments(int argc, char** argv) {
             command.policy = RequireValue(index, argc, argv);
         } else if (argument == "--output") {
             command.output = RequireValue(index, argc, argv);
+        } else if (argument == "--entity-store") {
+            command.entity_store = RequireValue(index, argc, argv);
+        } else if (argument == "--initialize-entity-store") {
+            command.initialize_entity_store = RequireValue(index, argc, argv);
         } else if (argument == "--nodes") {
             command.config.node_count = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--buckets") {
@@ -139,6 +145,8 @@ CommandLine ParseArguments(int argc, char** argv) {
                 << "  --policy no-action|reactive|recent-window|lstm\n"
                 << "  --nodes N --buckets N --entities N --windows N --requests N\n"
                 << "  --node-capacity N --node-memory-bytes N\n"
+                << "  --entity-store path/to/entities.hbkv\n"
+                << "  --initialize-entity-store path/to/entities.hbkv\n"
                 << "  --hotspot-duration N --replica-ttl N --threshold N --seed N\n"
                 << "  --workload-pattern step|ramp|gradual|burst|random|stable\n"
                 << "  --read-ratio R --hotspot-share R --base-latency-us R\n"
@@ -492,8 +500,23 @@ void StreamCompleteJson(const std::string& policy,
 
 int main(int argc, char** argv) {
     try {
-        const auto command = ParseArguments(argc, argv);
-        const auto entities = hotbucket::MakeBattlefieldScenario(command.config.entity_count);
+        auto command = ParseArguments(argc, argv);
+        if (!command.initialize_entity_store.empty()) {
+            const auto initial_entities =
+                hotbucket::MakeBattlefieldScenario(command.config.entity_count);
+            hotbucket::SaveEntityStore(
+                command.initialize_entity_store, initial_entities);
+            std::cout << "entity_store=" << command.initialize_entity_store << '\n'
+                      << "entities=" << initial_entities.size() << '\n';
+            return 0;
+        }
+        const auto entities = command.entity_store.empty()
+                                  ? hotbucket::MakeBattlefieldScenario(
+                                        command.config.entity_count)
+                                  : hotbucket::LoadEntityStore(
+                                        command.entity_store,
+                                        command.config.entity_count);
+        command.config.entity_count = entities.size();
         hotbucket::EntityMemoryCluster memory_cluster(
             command.config.node_count,
             command.config.bucket_count,
@@ -571,7 +594,13 @@ int main(int argc, char** argv) {
             std::move(lstm_predictions),
             command.lstm_minimum_probability,
             command.lstm_minimum_predicted_get_ratio);
-        hotbucket::MovingHotspotWorkload workload(command.config);
+        std::vector<std::uint64_t> entity_ids;
+        entity_ids.reserve(entities.size());
+        for (const auto& entity : entities) {
+            entity_ids.push_back(entity.entity_id);
+        }
+        hotbucket::MovingHotspotWorkload workload(
+            command.config, std::move(entity_ids));
         hotbucket::ClusterSimulator cluster(command.config);
         std::vector<std::size_t> bucket_bytes(command.config.bucket_count, 0);
         for (std::size_t bucket = 0; bucket < command.config.bucket_count; ++bucket) {

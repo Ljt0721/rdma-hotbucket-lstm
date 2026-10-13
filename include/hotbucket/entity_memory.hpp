@@ -90,5 +90,10 @@ private:
 
 std::vector<BattlefieldEntity> MakeBattlefieldScenario(std::size_t entity_count);
 std::vector<std::uint8_t> SerializeEntity(const BattlefieldEntity& entity);
+BattlefieldEntity DeserializeEntity(const std::vector<std::uint8_t>& serialized);
+std::vector<BattlefieldEntity> LoadEntityStore(const std::string& path,
+                                               std::size_t maximum_entities = 0);
+void SaveEntityStore(const std::string& path,
+                     const std::vector<BattlefieldEntity>& entities);
 
 }  // namespace hotbucket

@@ -4,16 +4,28 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 
 namespace hotbucket {
 
-MovingHotspotWorkload::MovingHotspotWorkload(const SimulationConfig& config)
-    : config_(config), random_(config.seed) {
+MovingHotspotWorkload::MovingHotspotWorkload(
+    const SimulationConfig& config,
+    std::vector<std::uint64_t> entity_ids)
+    : config_(config), entity_ids_(std::move(entity_ids)), random_(config.seed) {
     if (config_.bucket_count < 2) {
         throw std::invalid_argument("bucket_count must be at least 2");
     }
     if (config_.entity_count < 2) {
         throw std::invalid_argument("entity_count must be at least 2");
+    }
+    if (entity_ids_.empty()) {
+        entity_ids_.reserve(config_.entity_count);
+        for (std::size_t index = 0; index < config_.entity_count; ++index) {
+            entity_ids_.push_back(1001 + index);
+        }
+    }
+    if (entity_ids_.size() != config_.entity_count) {
+        throw std::invalid_argument("entity ID count must match entity_count");
     }
     if (config_.hotspot_duration_windows == 0) {
         throw std::invalid_argument("hotspot_duration_windows must be positive");
@@ -34,16 +46,16 @@ MovingHotspotWorkload::MovingHotspotWorkload(const SimulationConfig& config)
 
 std::size_t MovingHotspotWorkload::ScheduledEntityIndex(std::size_t phase) const {
     if (config_.workload_pattern == "stable") {
-        return 2 % config_.entity_count;
+        return 2 % entity_ids_.size();
     }
     if (config_.workload_pattern == "random") {
         std::uint64_t value = config_.seed + phase + 0x9e3779b97f4a7c15ULL;
         value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
         value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
         value ^= value >> 31U;
-        return static_cast<std::size_t>(value % config_.entity_count);
+        return static_cast<std::size_t>(value % entity_ids_.size());
     }
-    return (phase * 3 + 2) % config_.entity_count;
+    return (phase * 3 + 2) % entity_ids_.size();
 }
 
 MovingHotspotWorkload::HotspotMix MovingHotspotWorkload::MixForWindow(
@@ -93,13 +105,13 @@ std::size_t MovingHotspotWorkload::HotBucketForWindow(std::size_t window_id) con
     const auto entity_index = mix.secondary_share > mix.primary_share
                                   ? mix.secondary_entity_index
                                   : mix.primary_entity_index;
-    return (1001 + entity_index) % config_.bucket_count;
+    return entity_ids_[entity_index] % config_.bucket_count;
 }
 
 std::vector<Request> MovingHotspotWorkload::GenerateWindow(std::size_t window_id) {
     std::bernoulli_distribution choose_get(config_.read_ratio);
     std::uniform_real_distribution<double> choose_share(0.0, 1.0);
-    std::uniform_int_distribution<std::size_t> choose_entity(0, config_.entity_count - 1);
+    std::uniform_int_distribution<std::size_t> choose_entity(0, entity_ids_.size() - 1);
     const auto mix = MixForWindow(window_id);
 
     std::vector<Request> requests;
@@ -116,10 +128,10 @@ std::vector<Request> MovingHotspotWorkload::GenerateWindow(std::size_t window_id
             entity_index = choose_entity(random_);
             while ((entity_index == mix.primary_entity_index && mix.primary_share > 0.0) ||
                    (entity_index == mix.secondary_entity_index && mix.secondary_share > 0.0)) {
-                entity_index = (entity_index + 1) % config_.entity_count;
+                entity_index = (entity_index + 1) % entity_ids_.size();
             }
         }
-        const std::uint64_t entity_id = 1001 + entity_index;
+        const std::uint64_t entity_id = entity_ids_[entity_index];
         const auto bucket = entity_id % config_.bucket_count;
         requests.push_back(Request{
             entity_id,

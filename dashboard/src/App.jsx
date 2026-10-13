@@ -9,6 +9,8 @@ import {
   Gauge,
   MemoryStick,
   Play,
+  Plus,
+  Search,
   Server,
   Square,
   TerminalSquare,
@@ -297,6 +299,59 @@ function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, ho
   );
 }
 
+function KvStorePanel({ store, keyValue, onKeyChange, onQuery, onCreateTank, record, message, disabled }) {
+  return (
+    <section className="panel kv-panel">
+      <div className="section-heading">
+        <div><Database size={18} /><h2>Persistent entity KV store</h2></div>
+        <span>{store ? `${store.count} records · ${store.store}` : "Loading HBKV file"}</span>
+      </div>
+      <div className="kv-toolbar">
+        <form onSubmit={onQuery}>
+          <label htmlFor="kv-key">EntityID key</label>
+          <input
+            id="kv-key"
+            value={keyValue}
+            inputMode="numeric"
+            onChange={(event) => onKeyChange(event.target.value)}
+            disabled={disabled}
+          />
+          <button type="submit" title="Query entity by key" disabled={disabled}>
+            <Search size={16} />
+          </button>
+        </form>
+        <button className="create-entity-button" type="button" onClick={onCreateTank} disabled={disabled}>
+          <Plus size={16} /> Create tank with this key
+        </button>
+        <span className="kv-message">{message}</span>
+      </div>
+      {record && (
+        <div className="kv-result">
+          <div className="kv-record-heading">
+            <strong>{record.callsign}</strong>
+            <span>{record.entityType} · key {record.id} · bucket #{record.bucketId} · {formatBytes(record.serializedBytes)} on disk</span>
+          </div>
+          <div className="attribute-table-wrap">
+            <table className="attribute-table">
+              <thead><tr><th>Attribute key</th><th>Type</th><th>Value</th><th>Size</th></tr></thead>
+              <tbody>
+                {record.attributes.map((attribute) => (
+                  <tr key={attribute.name}>
+                    <td>{attribute.name}</td>
+                    <td>{attribute.valueType}</td>
+                    <td title={attribute.value}>{attribute.value}</td>
+                    <td>{formatBytes(attribute.valueBytes)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function NumberField({ label, name, value, min, max, step = 1, onChange, disabled }) {
   return (
     <label className="field">
@@ -326,6 +381,10 @@ export default function App() {
   const [debugLogs, setDebugLogs] = useState([]);
   const [logEndpoint, setLogEndpoint] = useState("/api/logs");
   const [rdmaHealth, setRdmaHealth] = useState(null);
+  const [kvStore, setKvStore] = useState(null);
+  const [kvKey, setKvKey] = useState("1002");
+  const [kvRecord, setKvRecord] = useState(null);
+  const [kvMessage, setKvMessage] = useState("Query a durable entity record by key");
   const sourceRef = useRef(null);
 
   useEffect(() => {
@@ -349,6 +408,21 @@ export default function App() {
       controller.abort();
       sourceRef.current?.close();
     };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/kv/entities", { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `Entity store request failed (${response.status})`);
+        setKvStore(payload);
+        setSettings((current) => ({ ...current, entities: Math.min(100, payload.count) }));
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") setKvMessage(error.message);
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -398,6 +472,81 @@ export default function App() {
 
   function selectMode(mode) {
     setSettings((current) => ({ ...current, mode }));
+  }
+
+  async function refreshEntityStoreAndPlacement(preferredId = null) {
+    const storeResponse = await fetch("/api/kv/entities");
+    const storePayload = await storeResponse.json();
+    if (!storeResponse.ok) throw new Error(storePayload.error || "Could not refresh the entity store.");
+    setKvStore(storePayload);
+    const entityCount = Math.min(100, storePayload.count);
+    setSettings((current) => ({ ...current, entities: entityCount }));
+    const placementResponse = await fetch(
+      `/api/placement?nodes=${settings.nodes}&buckets=${settings.buckets}&entities=${entityCount}`,
+    );
+    const placementPayload = await placementResponse.json();
+    if (!placementResponse.ok) throw new Error(placementPayload.error || "Could not refresh placement.");
+    setPlacement(placementPayload);
+    const allocated = placementPayload.nodes?.flatMap((node) => node.entities) || [];
+    const selected = preferredId == null
+      ? allocated.find((entity) => !entity.isReplica)
+      : allocated.find((entity) => entity.id === preferredId && !entity.isReplica);
+    if (selected) setSelectedAllocationKey(allocationKey(selected));
+  }
+
+  async function queryEntity(event) {
+    event?.preventDefault();
+    const id = Number(kvKey);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      setKvMessage("Enter a positive EntityID");
+      return;
+    }
+    try {
+      const response = await fetch(`/api/kv/entities/${id}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `Query failed (${response.status})`);
+      setKvRecord(payload.entity);
+      setKvMessage(`Loaded key ${id} from the durable HBKV file`);
+      const allocated = placement?.nodes?.flatMap((node) => node.entities) || [];
+      const primary = allocated.find((entity) => entity.id === id && !entity.isReplica);
+      if (primary) setSelectedAllocationKey(allocationKey(primary));
+    } catch (error) {
+      setKvRecord(null);
+      setKvMessage(error.message);
+    }
+  }
+
+  async function createTank() {
+    const id = Number(kvKey);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      setKvMessage("Enter a new positive EntityID first");
+      return;
+    }
+    try {
+      const response = await fetch("/api/kv/entities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id,
+          callsign: `Tank-${id}`,
+          entityType: "MainBattleTank",
+          attributes: [
+            { name: "position", valueType: "Vector3", value: "0.00,0.00,0.00" },
+            { name: "velocity", valueType: "Vector3", value: "0.00,0.00,0.00" },
+            { name: "health", valueType: "Float", value: "1.00" },
+            { name: "ammunition", valueType: "Record", value: "APFSDS=30;HEAT=20;SMOKE=8" },
+            { name: "status", valueType: "Enum", value: "READY" },
+          ],
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `Create failed (${response.status})`);
+      setKvRecord(payload.entity);
+      await refreshEntityStoreAndPlacement(id);
+      setKvMessage(`Created tank ${id}; future runs will load it from disk`);
+    } catch (error) {
+      setKvMessage(error.message);
+    }
   }
 
   function stopRun() {
@@ -647,10 +796,26 @@ export default function App() {
             />
           </section>
 
+          <KvStorePanel
+            store={kvStore}
+            keyValue={kvKey}
+            onKeyChange={setKvKey}
+            onQuery={queryEntity}
+            onCreateTank={createTank}
+            record={kvRecord}
+            message={kvMessage}
+            disabled={status === "running"}
+          />
+
           <EntityMemoryAllocation
             placement={placement}
             selectedAllocationKey={selectedAllocationKey}
-            onSelect={setSelectedAllocationKey}
+            onSelect={(key) => {
+              setSelectedAllocationKey(key);
+              const selected = placement?.nodes?.flatMap((node) => node.entities)
+                .find((entity) => allocationKey(entity) === key);
+              if (selected) setKvKey(String(selected.id));
+            }}
             hotBucket={latest?.hotBucket}
           />
 

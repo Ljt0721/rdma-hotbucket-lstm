@@ -4,6 +4,7 @@
 #include "hotbucket/replica_bundle.hpp"
 #include "hotbucket/workload.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cmath>
 #include <filesystem>
@@ -87,6 +88,44 @@ void TestTenEntitiesAreStoredAcrossFiveMemoryNodes() {
         }
     }
     Require(allocated_entities == 10, "all ten battlefield entities should be allocated");
+}
+
+void TestDurableEntityStoreRoundTrip() {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "hotbucket-entity-store-test.hbkv";
+    const auto entities = hotbucket::MakeBattlefieldScenario(10);
+    hotbucket::SaveEntityStore(path.string(), entities);
+    const auto loaded = hotbucket::LoadEntityStore(path.string());
+    std::filesystem::remove(path);
+
+    Require(loaded.size() == entities.size(),
+            "durable entity store should preserve its record count");
+    for (std::size_t index = 0; index < entities.size(); ++index) {
+        Require(loaded[index].entity_id == entities[index].entity_id,
+                "durable entity store should preserve each key");
+        Require(hotbucket::SerializeEntity(loaded[index]) ==
+                    hotbucket::SerializeEntity(entities[index]),
+                "durable entity store should preserve each serialized value");
+        Require(hotbucket::DeserializeEntity(
+                    hotbucket::SerializeEntity(entities[index])).entity_id ==
+                    entities[index].entity_id,
+                "serialized entity bytes should be queryable by their decoded key");
+    }
+}
+
+void TestWorkloadUsesStoredEntityIds() {
+    hotbucket::SimulationConfig config;
+    config.entity_count = 3;
+    config.bucket_count = 64;
+    config.requests_per_window = 200;
+    const std::vector<std::uint64_t> entity_ids{501, 9001, 42000};
+    hotbucket::MovingHotspotWorkload workload(config, entity_ids);
+
+    for (const auto& request : workload.GenerateWindow(0)) {
+        Require(std::find(entity_ids.begin(), entity_ids.end(), request.entity_id) !=
+                    entity_ids.end(),
+                "workload should access keys loaded from the durable entity store");
+    }
 }
 
 void TestWorkloadUsesAllocatedBattlefieldEntities() {
@@ -313,6 +352,8 @@ int main() {
         TestHotspotMovesDeterministically();
         TestReplicaSplitsReadLoad();
         TestTenEntitiesAreStoredAcrossFiveMemoryNodes();
+        TestDurableEntityStoreRoundTrip();
+        TestWorkloadUsesStoredEntityIds();
         TestWorkloadUsesAllocatedBattlefieldEntities();
         TestRampWorkloadBuildsLoadGradually();
         TestRandomScheduleIsReproducible();

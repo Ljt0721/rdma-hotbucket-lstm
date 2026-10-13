@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -6,6 +6,9 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
@@ -17,6 +20,8 @@ const distRoot = path.join(dashboardRoot, "dist");
 const port = Number(process.env.DASHBOARD_PORT || 8787);
 const logDirectory = path.join(projectRoot, "results", "dashboard", "logs");
 const logPath = path.join(logDirectory, "dashboard-server.jsonl");
+const entityStorePath = process.env.ENTITY_STORE_PATH
+  || path.join(projectRoot, "data", "entity-store", "entities.hbkv");
 mkdirSync(logDirectory, { recursive: true });
 
 const executableNames = process.platform === "win32"
@@ -155,6 +160,305 @@ function simulatorPath() {
   return executableCandidates.find((candidate) => existsSync(candidate));
 }
 
+function ensureEntityStore() {
+  if (existsSync(entityStorePath)) return;
+  const executable = simulatorPath();
+  if (!executable) {
+    throw new Error("Cannot initialize the entity store before the simulator is built.");
+  }
+  mkdirSync(path.dirname(entityStorePath), { recursive: true });
+  execFileSync(executable, [
+    "--entities", "10",
+    "--initialize-entity-store", entityStorePath,
+  ], { cwd: projectRoot, windowsHide: true });
+}
+
+function normalizeEntity(input, forcedId = null) {
+  const id = forcedId ?? Number(input?.id ?? input?.entityId);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error("EntityID must be a positive safe integer.");
+  }
+  const callsign = String(input?.callsign ?? "").trim();
+  const entityType = String(input?.entityType ?? input?.type ?? "").trim();
+  if (!callsign || !entityType || callsign.length > 128 || entityType.length > 128) {
+    throw new Error("Callsign and entity type are required and limited to 128 characters.");
+  }
+
+  const rawAttributes = Array.isArray(input?.attributes)
+    ? input.attributes
+    : Object.entries(input?.attributes || {}).map(([name, attribute]) => ({
+        name,
+        valueType: attribute?.valueType ?? attribute?.type ?? "String",
+        value: attribute?.value ?? attribute,
+      }));
+  if (!rawAttributes.length || rawAttributes.length > 128) {
+    throw new Error("An entity requires between 1 and 128 attributes.");
+  }
+  const names = new Set();
+  const attributes = rawAttributes.map((attribute) => {
+    const name = String(attribute?.name ?? "").trim();
+    const valueType = String(attribute?.valueType ?? attribute?.type ?? "String").trim();
+    const value = String(attribute?.value ?? "");
+    if (!name || !valueType || name.length > 128 || valueType.length > 64 || value.length > 65535) {
+      throw new Error("Attribute keys, types, and values must be non-empty and within limits.");
+    }
+    if (names.has(name)) throw new Error(`Duplicate attribute key: ${name}`);
+    names.add(name);
+    return { name, valueType, value };
+  });
+  return { id, callsign, entityType, attributes };
+}
+
+function encodeLengthString(value) {
+  const text = Buffer.from(value, "utf8");
+  const length = Buffer.allocUnsafe(4);
+  length.writeUInt32LE(text.length);
+  return Buffer.concat([length, text]);
+}
+
+function encodeEntity(entity) {
+  const id = Buffer.allocUnsafe(8);
+  id.writeBigUInt64LE(BigInt(entity.id));
+  const attributeCount = Buffer.allocUnsafe(4);
+  attributeCount.writeUInt32LE(entity.attributes.length);
+  const fields = [
+    id,
+    encodeLengthString(entity.callsign),
+    encodeLengthString(entity.entityType),
+    attributeCount,
+  ];
+  for (const attribute of entity.attributes) {
+    fields.push(
+      encodeLengthString(attribute.name),
+      encodeLengthString(attribute.valueType),
+      encodeLengthString(attribute.value),
+    );
+  }
+  return Buffer.concat(fields);
+}
+
+function readUInt32(buffer, state) {
+  if (state.offset + 4 > buffer.length) throw new Error("HBKV record ends inside uint32.");
+  const value = buffer.readUInt32LE(state.offset);
+  state.offset += 4;
+  return value;
+}
+
+function readUInt64(buffer, state) {
+  if (state.offset + 8 > buffer.length) throw new Error("HBKV record ends inside uint64.");
+  const value = buffer.readBigUInt64LE(state.offset);
+  state.offset += 8;
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("EntityID exceeds JavaScript's safe range.");
+  return Number(value);
+}
+
+function readLengthString(buffer, state) {
+  const length = readUInt32(buffer, state);
+  if (state.offset + length > buffer.length) throw new Error("HBKV string exceeds its record.");
+  const value = buffer.toString("utf8", state.offset, state.offset + length);
+  state.offset += length;
+  return value;
+}
+
+function decodeEntity(payload) {
+  const state = { offset: 0 };
+  const entity = {
+    id: readUInt64(payload, state),
+    callsign: readLengthString(payload, state),
+    entityType: readLengthString(payload, state),
+    attributes: [],
+  };
+  const attributeCount = readUInt32(payload, state);
+  for (let index = 0; index < attributeCount; index += 1) {
+    const name = readLengthString(payload, state);
+    const valueType = readLengthString(payload, state);
+    const value = readLengthString(payload, state);
+    entity.attributes.push({
+      name,
+      valueType,
+      value,
+      valueBytes: Buffer.byteLength(value, "utf8"),
+    });
+  }
+  if (state.offset !== payload.length) throw new Error("HBKV entity contains trailing bytes.");
+  return { ...entity, serializedBytes: payload.length };
+}
+
+function readEntityStore() {
+  ensureEntityStore();
+  const encoded = readFileSync(entityStorePath);
+  if (encoded.length < 12 || encoded.toString("ascii", 0, 4) !== "HBKV") {
+    throw new Error("Entity store has an invalid HBKV header.");
+  }
+  const state = { offset: 4 };
+  const version = readUInt32(encoded, state);
+  const count = readUInt32(encoded, state);
+  if (version !== 1) throw new Error(`Unsupported HBKV version: ${version}`);
+  const entities = [];
+  const keys = new Set();
+  for (let index = 0; index < count; index += 1) {
+    const key = readUInt64(encoded, state);
+    const length = readUInt32(encoded, state);
+    if (state.offset + length > encoded.length) throw new Error("HBKV value exceeds the store file.");
+    const entity = decodeEntity(encoded.subarray(state.offset, state.offset + length));
+    state.offset += length;
+    if (entity.id !== key || keys.has(key)) throw new Error("HBKV contains a mismatched or duplicate key.");
+    keys.add(key);
+    entities.push(entity);
+  }
+  if (state.offset !== encoded.length) throw new Error("HBKV store contains trailing bytes.");
+  return entities.sort((left, right) => left.id - right.id);
+}
+
+function writeEntityStore(entities) {
+  const normalized = entities.map((entity) => normalizeEntity(entity));
+  const keys = new Set();
+  const records = normalized.sort((left, right) => left.id - right.id).map((entity) => {
+    if (keys.has(entity.id)) throw new Error(`Duplicate EntityID: ${entity.id}`);
+    keys.add(entity.id);
+    const value = encodeEntity(entity);
+    const header = Buffer.allocUnsafe(12);
+    header.writeBigUInt64LE(BigInt(entity.id), 0);
+    header.writeUInt32LE(value.length, 8);
+    return Buffer.concat([header, value]);
+  });
+  const header = Buffer.allocUnsafe(12);
+  header.write("HBKV", 0, 4, "ascii");
+  header.writeUInt32LE(1, 4);
+  header.writeUInt32LE(records.length, 8);
+  mkdirSync(path.dirname(entityStorePath), { recursive: true });
+  const temporary = `${entityStorePath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, Buffer.concat([header, ...records]));
+    renameSync(temporary, entityStorePath);
+  } finally {
+    if (existsSync(temporary)) rmSync(temporary, { force: true });
+  }
+  return normalized;
+}
+
+function publicEntity(entity) {
+  return {
+    ...entity,
+    bucketId: entity.id % 64,
+    attributeMap: Object.fromEntries(
+      entity.attributes.map((attribute) => [attribute.name, {
+        type: attribute.valueType,
+        value: attribute.value,
+      }]),
+    ),
+  };
+}
+
+function readJsonBody(request, maximumBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+      if (Buffer.byteLength(body, "utf8") > maximumBytes) {
+        reject(new Error("Request body is too large."));
+        request.destroy();
+      }
+    });
+    request.on("end", () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch {
+        reject(new Error("Request body must be valid JSON."));
+      }
+    });
+    request.on("error", reject);
+  });
+}
+
+function sendJson(response, status, payload) {
+  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(payload));
+}
+
+async function handleEntityApi(request, response, url) {
+  const match = url.pathname.match(/^\/api\/kv\/entities(?:\/(\d+))?$/);
+  if (!match) return false;
+  try {
+    const entities = readEntityStore();
+    const requestedId = match[1] ? Number(match[1]) : null;
+    if (match[1] && (!Number.isSafeInteger(requestedId) || requestedId <= 0)) {
+      sendJson(response, 400, { error: "EntityID must be a positive safe integer." });
+      return true;
+    }
+
+    if (request.method === "GET" && requestedId === null) {
+      sendJson(response, 200, {
+        durable: true,
+        format: "HBKV v1",
+        store: path.relative(projectRoot, entityStorePath),
+        count: entities.length,
+        entities: entities.map(publicEntity),
+      });
+      return true;
+    }
+    if (request.method === "GET") {
+      const entity = entities.find((candidate) => candidate.id === requestedId);
+      sendJson(response, entity ? 200 : 404, entity
+        ? { durable: true, store: path.relative(projectRoot, entityStorePath), entity: publicEntity(entity) }
+        : { error: `EntityID ${requestedId} was not found.` });
+      return true;
+    }
+    if (request.method === "POST" && requestedId === null) {
+      const entity = normalizeEntity(await readJsonBody(request));
+      if (entities.some((candidate) => candidate.id === entity.id)) {
+        sendJson(response, 409, { error: `EntityID ${entity.id} already exists.` });
+        return true;
+      }
+      writeEntityStore([...entities, entity]);
+      writeLog("INFO", "kv_entity_created", { entityId: entity.id, entityType: entity.entityType });
+      sendJson(response, 201, { durable: true, entity: publicEntity({
+        ...entity,
+        serializedBytes: encodeEntity(entity).length,
+      }) });
+      return true;
+    }
+    if (request.method === "PUT" && requestedId !== null) {
+      const entity = normalizeEntity(await readJsonBody(request), requestedId);
+      const existingIndex = entities.findIndex((candidate) => candidate.id === requestedId);
+      const updated = [...entities];
+      if (existingIndex >= 0) updated[existingIndex] = entity;
+      else updated.push(entity);
+      writeEntityStore(updated);
+      writeLog("INFO", existingIndex >= 0 ? "kv_entity_updated" : "kv_entity_created", {
+        entityId: entity.id,
+        entityType: entity.entityType,
+      });
+      sendJson(response, existingIndex >= 0 ? 200 : 201, { durable: true, entity: publicEntity({
+        ...entity,
+        serializedBytes: encodeEntity(entity).length,
+      }) });
+      return true;
+    }
+    if (request.method === "DELETE" && requestedId !== null) {
+      if (!entities.some((candidate) => candidate.id === requestedId)) {
+        sendJson(response, 404, { error: `EntityID ${requestedId} was not found.` });
+        return true;
+      }
+      if (entities.length <= 2) {
+        sendJson(response, 409, { error: "The simulator requires at least two stored entities." });
+        return true;
+      }
+      writeEntityStore(entities.filter((candidate) => candidate.id !== requestedId));
+      writeLog("INFO", "kv_entity_deleted", { entityId: requestedId });
+      sendJson(response, 200, { durable: true, deletedEntityId: requestedId });
+      return true;
+    }
+    sendJson(response, 405, { error: "Method not allowed for this entity-store endpoint." });
+    return true;
+  } catch (error) {
+    writeLog("ERROR", "kv_entity_request_failed", { method: request.method, message: error.message });
+    if (!response.writableEnded) sendJson(response, 400, { error: error.message });
+    return true;
+  }
+}
+
 function writeLog(level, event, details = {}) {
   const entry = {
     timestamp: new Date().toISOString(),
@@ -258,6 +562,7 @@ async function prepareLstmPredictions(settings, runId, response) {
   if (!existsSync(lstmConfig.checkpointPath)) {
     throw new Error(`LSTM checkpoint was not found: ${lstmConfig.checkpointPath}`);
   }
+  ensureEntityStore();
   if (settings.windows < 7) {
     throw new Error("LSTM runs need at least seven windows: six observations and one target.");
   }
@@ -279,6 +584,7 @@ async function prepareLstmPredictions(settings, runId, response) {
   await runCommand(executable, [
     "--trace-only",
     "--trace-id", traceId,
+    "--entity-store", path.relative(projectRoot, entityStorePath),
     "--workload-pattern", "step",
     "--nodes", String(settings.nodes),
     "--buckets", String(settings.buckets),
@@ -322,6 +628,12 @@ function getPlacement(response, url) {
     response.end(JSON.stringify({ error: "Simulator executable was not found." }));
     return;
   }
+  try {
+    ensureEntityStore();
+  } catch (error) {
+    sendJson(response, 503, { error: error.message });
+    return;
+  }
 
   const { nodes, buckets, entities } = placementSettings(url);
   const memoryBytes = nodeMemoryBytes(nodes, entities);
@@ -329,6 +641,7 @@ function getPlacement(response, url) {
     "--nodes", String(nodes),
     "--buckets", String(buckets),
     "--entities", String(entities),
+    "--entity-store", path.relative(projectRoot, entityStorePath),
     "--node-memory-bytes", String(memoryBytes),
     "--stream-json",
     "--placement-only",
@@ -465,6 +778,7 @@ async function startRdmaSimulation(request, response, url) {
   const services = [];
   let computeChild = null;
   let remotePredictionPath = null;
+  let remoteEntityStorePath = null;
   let completed = false;
   let cleaned = false;
 
@@ -476,10 +790,11 @@ async function startRdmaSimulation(request, response, url) {
       if (service.child.exitCode === null) service.child.kill();
     }
     void requestRemoteServiceStop(settings.nodes);
-    if (remotePredictionPath) {
+    const remoteFiles = [remotePredictionPath, remoteEntityStorePath].filter(Boolean);
+    if (remoteFiles.length) {
       void runCommand(
         sshExecutable,
-        sshArgs(rdmaConfig.clientHost, `rm -f ${remotePredictionPath}`),
+        sshArgs(rdmaConfig.clientHost, `rm -f ${remoteFiles.join(" ")}`),
         { timeout: 5000 },
       ).catch(() => null);
     }
@@ -503,6 +818,20 @@ async function startRdmaSimulation(request, response, url) {
         .join("; ");
       throw new Error(`RDMA environment is not ready. ${failures}`);
     }
+
+    ensureEntityStore();
+    remoteEntityStorePath = `/tmp/hotbucket-dashboard-${runId}-entities.hbkv`;
+    sendEvent(response, {
+      type: "rdma-status",
+      state: "uploading-entities",
+      message: "Sending the durable entity KV snapshot to the compute VM",
+    });
+    await runCommand(scpExecutable, [
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=5",
+      entityStorePath,
+      `${rdmaConfig.clientHost}:${remoteEntityStorePath}`,
+    ], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
 
     let lstmPrediction = null;
     if (settings.policy === "lstm") {
@@ -544,6 +873,7 @@ async function startRdmaSimulation(request, response, url) {
       "--nodes", String(settings.nodes),
       "--buckets", String(settings.buckets),
       "--entities", String(settings.entities),
+      "--entity-store", remoteEntityStorePath,
       "--node-memory-bytes", String(memoryBytes),
       "--windows", String(settings.windows),
       "--requests", String(settings.requests),
@@ -717,6 +1047,14 @@ async function startSimulation(request, response, url) {
     response.end();
     return;
   }
+  try {
+    ensureEntityStore();
+  } catch (error) {
+    writeLog("ERROR", "entity_store_unavailable", { runId, message: error.message });
+    sendEvent(response, { type: "error", runId, message: error.message });
+    response.end();
+    return;
+  }
 
   const {
     policy,
@@ -762,6 +1100,7 @@ async function startSimulation(request, response, url) {
     "--nodes", String(nodes),
     "--buckets", String(buckets),
     "--entities", String(entities),
+    "--entity-store", path.relative(projectRoot, entityStorePath),
     "--node-memory-bytes", String(memoryBytes),
     "--windows", String(windows),
     "--requests", String(requests),
@@ -954,6 +1293,10 @@ function serveStatic(response, pathname) {
 
 const server = createServer((request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  if (url.pathname.startsWith("/api/kv/entities")) {
+    void handleEntityApi(request, response, url);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/health") {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
