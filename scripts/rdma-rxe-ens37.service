@@ -1,0 +1,13 @@
+[Unit]
+Description=Soft-RoCE device for the RDMA lab network
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe rdma_rxe
+ExecStart=/bin/sh -c '/usr/bin/rdma link show | /usr/bin/grep -q "netdev ens37" || /usr/bin/rdma link add rxe_ens37 type rxe netdev ens37'
+
+[Install]
+WantedBy=multi-user.target

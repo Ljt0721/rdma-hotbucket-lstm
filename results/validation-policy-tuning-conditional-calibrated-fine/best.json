@@ -1,0 +1,63 @@
+{
+  "selection_data": "validation windows only",
+  "evaluation_start_fraction": 0.7,
+  "evaluation_end_fraction": 0.85,
+  "copy_cost_model": {
+    "fixed_cost_ms": 2.33723710530255,
+    "copy_bandwidth_mib_per_ms": 0.012051368554152328,
+    "source": "results\\rdma-calibration\\summary.json",
+    "percentile": "p50"
+  },
+  "best": {
+    "minimum_probability": 0.5,
+    "minimum_predicted_get_ratio": 0.0,
+    "mean_completion_ms": 17894.19145833333,
+    "mean_improvement_vs_no_action_pct": 56.2504368205256,
+    "mean_improvement_vs_recent_pct": 0.6880440255739257,
+    "mean_copies": 8.770833333333334,
+    "wins_vs_recent": 12,
+    "traces": 48
+  },
+  "trials": [
+    {
+      "minimum_probability": 0.5,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 17894.19145833333,
+      "mean_improvement_vs_no_action_pct": 56.2504368205256,
+      "mean_improvement_vs_recent_pct": 0.6880440255739257,
+      "mean_copies": 8.770833333333334,
+      "wins_vs_recent": 12,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.6,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 17905.4136875,
+      "mean_improvement_vs_no_action_pct": 56.48901244703148,
+      "mean_improvement_vs_recent_pct": 1.0133194354157473,
+      "mean_copies": 8.479166666666666,
+      "wins_vs_recent": 12,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.45,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 17910.914395833333,
+      "mean_improvement_vs_no_action_pct": 56.22547267389856,
+      "mean_improvement_vs_recent_pct": 0.5809160448097533,
+      "mean_copies": 8.875,
+      "wins_vs_recent": 13,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.55,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 17918.876333333334,
+      "mean_improvement_vs_no_action_pct": 56.25513526176891,
+      "mean_improvement_vs_recent_pct": 0.6860054847226819,
+      "mean_copies": 8.6875,
+      "wins_vs_recent": 12,
+      "traces": 48
+    }
+  ]
+}

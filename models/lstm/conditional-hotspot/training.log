@@ -1,0 +1,207 @@
+2026-10-13 17:59:35 INFO Hot-bucket LSTM training
+2026-10-13 17:59:35 INFO device=cuda parameters=5058 train=77760 validation=17280 test=17280
+2026-10-13 17:59:35 INFO sequence=6 windows horizon=1 window features=get_count,put_count,read_ratio,request_share,home_node_logical_load_ratio
+2026-10-13 17:59:37 INFO epoch 001/060 | train 0.59078 | val 0.40012 | P 0.792 R 0.891 F1 0.839 | share_MAE 0.3657 hot_share_MAE 0.0669 | 2.03s
+2026-10-13 17:59:37 INFO   saved new best checkpoint (validation loss 0.40012)
+2026-10-13 17:59:39 INFO epoch 002/060 | train 0.39281 | val 0.37487 | P 0.790 R 0.899 F1 0.841 | share_MAE 0.3852 hot_share_MAE 0.0623 | 1.55s
+2026-10-13 17:59:39 INFO   saved new best checkpoint (validation loss 0.37487)
+2026-10-13 17:59:40 INFO epoch 003/060 | train 0.37754 | val 0.36345 | P 0.788 R 0.902 F1 0.841 | share_MAE 0.4023 hot_share_MAE 0.0582 | 1.56s
+2026-10-13 17:59:40 INFO   saved new best checkpoint (validation loss 0.36345)
+2026-10-13 17:59:42 INFO epoch 004/060 | train 0.36587 | val 0.35367 | P 0.800 R 0.900 F1 0.847 | share_MAE 0.3712 hot_share_MAE 0.0554 | 1.46s
+2026-10-13 17:59:42 INFO   saved new best checkpoint (validation loss 0.35367)
+2026-10-13 17:59:44 INFO epoch 005/060 | train 0.35642 | val 0.35032 | P 0.791 R 0.902 F1 0.843 | share_MAE 0.4108 hot_share_MAE 0.0500 | 2.39s
+2026-10-13 17:59:44 INFO   saved new best checkpoint (validation loss 0.35032)
+2026-10-13 17:59:47 INFO epoch 006/060 | train 0.35108 | val 0.33694 | P 0.808 R 0.900 F1 0.851 | share_MAE 0.4098 hot_share_MAE 0.0464 | 2.50s
+2026-10-13 17:59:47 INFO   saved new best checkpoint (validation loss 0.33694)
+2026-10-13 17:59:49 INFO epoch 007/060 | train 0.34311 | val 0.33404 | P 0.798 R 0.902 F1 0.847 | share_MAE 0.4175 hot_share_MAE 0.0464 | 2.62s
+2026-10-13 17:59:49 INFO   saved new best checkpoint (validation loss 0.33404)
+2026-10-13 17:59:52 INFO epoch 008/060 | train 0.33637 | val 0.33069 | P 0.806 R 0.902 F1 0.852 | share_MAE 0.4011 hot_share_MAE 0.0438 | 2.64s
+2026-10-13 17:59:52 INFO   saved new best checkpoint (validation loss 0.33069)
+2026-10-13 17:59:55 INFO epoch 009/060 | train 0.33266 | val 0.31817 | P 0.810 R 0.903 F1 0.854 | share_MAE 0.4045 hot_share_MAE 0.0422 | 2.87s
+2026-10-13 17:59:55 INFO   saved new best checkpoint (validation loss 0.31817)
+2026-10-13 17:59:57 INFO epoch 010/060 | train 0.32760 | val 0.31394 | P 0.810 R 0.903 F1 0.854 | share_MAE 0.3906 hot_share_MAE 0.0418 | 2.51s
+2026-10-13 17:59:57 INFO   saved new best checkpoint (validation loss 0.31394)
+2026-10-13 18:00:00 INFO epoch 011/060 | train 0.32415 | val 0.31208 | P 0.816 R 0.903 F1 0.858 | share_MAE 0.3956 hot_share_MAE 0.0431 | 2.50s
+2026-10-13 18:00:00 INFO   saved new best checkpoint (validation loss 0.31208)
+2026-10-13 18:00:03 INFO epoch 012/060 | train 0.31778 | val 0.30497 | P 0.814 R 0.903 F1 0.856 | share_MAE 0.3979 hot_share_MAE 0.0418 | 2.86s
+2026-10-13 18:00:03 INFO   saved new best checkpoint (validation loss 0.30497)
+2026-10-13 18:00:05 INFO epoch 013/060 | train 0.31166 | val 0.30278 | P 0.834 R 0.901 F1 0.866 | share_MAE 0.3850 hot_share_MAE 0.0418 | 2.76s
+2026-10-13 18:00:05 INFO   saved new best checkpoint (validation loss 0.30278)
+2026-10-13 18:00:08 INFO epoch 014/060 | train 0.30843 | val 0.29173 | P 0.833 R 0.903 F1 0.867 | share_MAE 0.4002 hot_share_MAE 0.0427 | 2.94s
+2026-10-13 18:00:08 INFO   saved new best checkpoint (validation loss 0.29173)
+2026-10-13 18:00:11 INFO epoch 015/060 | train 0.30126 | val 0.30862 | P 0.845 R 0.900 F1 0.872 | share_MAE 0.4043 hot_share_MAE 0.0441 | 2.52s
+2026-10-13 18:00:13 INFO epoch 016/060 | train 0.29526 | val 0.28475 | P 0.814 R 0.908 F1 0.858 | share_MAE 0.3884 hot_share_MAE 0.0416 | 2.55s
+2026-10-13 18:00:13 INFO   saved new best checkpoint (validation loss 0.28475)
+2026-10-13 18:00:16 INFO epoch 017/060 | train 0.28639 | val 0.27890 | P 0.816 R 0.909 F1 0.860 | share_MAE 0.3959 hot_share_MAE 0.0413 | 2.59s
+2026-10-13 18:00:16 INFO   saved new best checkpoint (validation loss 0.27890)
+2026-10-13 18:00:19 INFO epoch 018/060 | train 0.28085 | val 0.26953 | P 0.717 R 0.933 F1 0.811 | share_MAE 0.3941 hot_share_MAE 0.0387 | 2.46s
+2026-10-13 18:00:19 INFO   saved new best checkpoint (validation loss 0.26953)
+2026-10-13 18:00:21 INFO epoch 019/060 | train 0.27574 | val 0.27286 | P 0.774 R 0.922 F1 0.841 | share_MAE 0.4055 hot_share_MAE 0.0399 | 2.65s
+2026-10-13 18:00:24 INFO epoch 020/060 | train 0.27094 | val 0.26218 | P 0.773 R 0.923 F1 0.841 | share_MAE 0.4032 hot_share_MAE 0.0402 | 2.52s
+2026-10-13 18:00:24 INFO   saved new best checkpoint (validation loss 0.26218)
+2026-10-13 18:00:26 INFO epoch 021/060 | train 0.26561 | val 0.26231 | P 0.769 R 0.926 F1 0.840 | share_MAE 0.3990 hot_share_MAE 0.0412 | 2.56s
+2026-10-13 18:00:29 INFO epoch 022/060 | train 0.26137 | val 0.25976 | P 0.783 R 0.921 F1 0.846 | share_MAE 0.3891 hot_share_MAE 0.0435 | 2.64s
+2026-10-13 18:00:29 INFO   saved new best checkpoint (validation loss 0.25976)
+2026-10-13 18:00:31 INFO epoch 023/060 | train 0.25727 | val 0.26740 | P 0.808 R 0.918 F1 0.859 | share_MAE 0.4045 hot_share_MAE 0.0444 | 2.51s
+2026-10-13 18:00:34 INFO epoch 024/060 | train 0.25642 | val 0.24819 | P 0.798 R 0.925 F1 0.857 | share_MAE 0.3845 hot_share_MAE 0.0425 | 2.54s
+2026-10-13 18:00:34 INFO   saved new best checkpoint (validation loss 0.24819)
+2026-10-13 18:00:36 INFO epoch 025/060 | train 0.24898 | val 0.25425 | P 0.833 R 0.912 F1 0.871 | share_MAE 0.3850 hot_share_MAE 0.0439 | 2.51s
+2026-10-13 18:00:39 INFO epoch 026/060 | train 0.24752 | val 0.24231 | P 0.750 R 0.937 F1 0.833 | share_MAE 0.3890 hot_share_MAE 0.0414 | 2.82s
+2026-10-13 18:00:39 INFO   saved new best checkpoint (validation loss 0.24231)
+2026-10-13 18:00:42 INFO epoch 027/060 | train 0.24486 | val 0.24950 | P 0.826 R 0.915 F1 0.869 | share_MAE 0.3774 hot_share_MAE 0.0419 | 2.52s
+2026-10-13 18:00:44 INFO epoch 028/060 | train 0.24362 | val 0.23348 | P 0.764 R 0.935 F1 0.841 | share_MAE 0.3935 hot_share_MAE 0.0428 | 2.46s
+2026-10-13 18:00:44 INFO   saved new best checkpoint (validation loss 0.23348)
+2026-10-13 18:00:47 INFO epoch 029/060 | train 0.23882 | val 0.23733 | P 0.714 R 0.943 F1 0.813 | share_MAE 0.3935 hot_share_MAE 0.0431 | 2.66s
+2026-10-13 18:00:49 INFO epoch 030/060 | train 0.23782 | val 0.23295 | P 0.770 R 0.932 F1 0.843 | share_MAE 0.3990 hot_share_MAE 0.0430 | 2.46s
+2026-10-13 18:00:49 INFO   saved new best checkpoint (validation loss 0.23295)
+2026-10-13 18:00:52 INFO epoch 031/060 | train 0.23220 | val 0.24588 | P 0.832 R 0.915 F1 0.872 | share_MAE 0.4000 hot_share_MAE 0.0424 | 2.52s
+2026-10-13 18:00:54 INFO epoch 032/060 | train 0.23619 | val 0.22990 | P 0.750 R 0.940 F1 0.834 | share_MAE 0.3986 hot_share_MAE 0.0420 | 2.51s
+2026-10-13 18:00:54 INFO   saved new best checkpoint (validation loss 0.22990)
+2026-10-13 18:00:57 INFO epoch 033/060 | train 0.23038 | val 0.23136 | P 0.790 R 0.926 F1 0.852 | share_MAE 0.3895 hot_share_MAE 0.0414 | 2.69s
+2026-10-13 18:01:00 INFO epoch 034/060 | train 0.22833 | val 0.22579 | P 0.792 R 0.930 F1 0.856 | share_MAE 0.3991 hot_share_MAE 0.0422 | 2.62s
+2026-10-13 18:01:00 INFO   saved new best checkpoint (validation loss 0.22579)
+2026-10-13 18:01:02 INFO epoch 035/060 | train 0.22649 | val 0.22273 | P 0.776 R 0.938 F1 0.849 | share_MAE 0.3912 hot_share_MAE 0.0420 | 2.44s
+2026-10-13 18:01:02 INFO   saved new best checkpoint (validation loss 0.22273)
+2026-10-13 18:01:05 INFO epoch 036/060 | train 0.22582 | val 0.22226 | P 0.749 R 0.940 F1 0.834 | share_MAE 0.3857 hot_share_MAE 0.0413 | 2.59s
+2026-10-13 18:01:05 INFO   saved new best checkpoint (validation loss 0.22226)
+2026-10-13 18:01:07 INFO epoch 037/060 | train 0.22370 | val 0.23528 | P 0.834 R 0.917 F1 0.873 | share_MAE 0.3956 hot_share_MAE 0.0425 | 2.47s
+2026-10-13 18:01:10 INFO epoch 038/060 | train 0.22068 | val 0.21839 | P 0.802 R 0.938 F1 0.864 | share_MAE 0.4010 hot_share_MAE 0.0419 | 2.54s
+2026-10-13 18:01:10 INFO   saved new best checkpoint (validation loss 0.21839)
+2026-10-13 18:01:12 INFO epoch 039/060 | train 0.21907 | val 0.21831 | P 0.754 R 0.943 F1 0.838 | share_MAE 0.4045 hot_share_MAE 0.0430 | 2.61s
+2026-10-13 18:01:12 INFO   saved new best checkpoint (validation loss 0.21831)
+2026-10-13 18:01:15 INFO epoch 040/060 | train 0.21456 | val 0.21933 | P 0.786 R 0.941 F1 0.857 | share_MAE 0.3853 hot_share_MAE 0.0425 | 2.52s
+2026-10-13 18:01:18 INFO epoch 041/060 | train 0.21501 | val 0.22775 | P 0.759 R 0.939 F1 0.840 | share_MAE 0.4102 hot_share_MAE 0.0431 | 2.69s
+2026-10-13 18:01:20 INFO epoch 042/060 | train 0.21334 | val 0.22602 | P 0.803 R 0.933 F1 0.863 | share_MAE 0.4014 hot_share_MAE 0.0438 | 2.50s
+2026-10-13 18:01:23 INFO epoch 043/060 | train 0.21418 | val 0.22584 | P 0.851 R 0.923 F1 0.886 | share_MAE 0.3897 hot_share_MAE 0.0415 | 2.47s
+2026-10-13 18:01:25 INFO epoch 044/060 | train 0.20982 | val 0.21517 | P 0.765 R 0.940 F1 0.844 | share_MAE 0.4044 hot_share_MAE 0.0429 | 2.56s
+2026-10-13 18:01:25 INFO   saved new best checkpoint (validation loss 0.21517)
+2026-10-13 18:01:28 INFO epoch 045/060 | train 0.20916 | val 0.22046 | P 0.824 R 0.931 F1 0.874 | share_MAE 0.4096 hot_share_MAE 0.0438 | 2.47s
+2026-10-13 18:01:30 INFO epoch 046/060 | train 0.21140 | val 0.21612 | P 0.729 R 0.943 F1 0.822 | share_MAE 0.3948 hot_share_MAE 0.0422 | 2.53s
+2026-10-13 18:01:33 INFO epoch 047/060 | train 0.20711 | val 0.22372 | P 0.826 R 0.925 F1 0.873 | share_MAE 0.3842 hot_share_MAE 0.0442 | 2.43s
+2026-10-13 18:01:35 INFO epoch 048/060 | train 0.20879 | val 0.20953 | P 0.776 R 0.939 F1 0.850 | share_MAE 0.4040 hot_share_MAE 0.0444 | 2.44s
+2026-10-13 18:01:35 INFO   saved new best checkpoint (validation loss 0.20953)
+2026-10-13 18:01:38 INFO epoch 049/060 | train 0.20816 | val 0.20951 | P 0.757 R 0.943 F1 0.840 | share_MAE 0.3874 hot_share_MAE 0.0417 | 2.55s
+2026-10-13 18:01:38 INFO   saved new best checkpoint (validation loss 0.20951)
+2026-10-13 18:01:40 INFO epoch 050/060 | train 0.20821 | val 0.21023 | P 0.800 R 0.933 F1 0.861 | share_MAE 0.4013 hot_share_MAE 0.0428 | 2.48s
+2026-10-13 18:01:43 INFO epoch 051/060 | train 0.20427 | val 0.21441 | P 0.859 R 0.930 F1 0.893 | share_MAE 0.3862 hot_share_MAE 0.0429 | 2.48s
+2026-10-13 18:01:45 INFO epoch 052/060 | train 0.20283 | val 0.22162 | P 0.828 R 0.925 F1 0.874 | share_MAE 0.3827 hot_share_MAE 0.0420 | 2.62s
+2026-10-13 18:01:48 INFO epoch 053/060 | train 0.20236 | val 0.22116 | P 0.837 R 0.930 F1 0.881 | share_MAE 0.3916 hot_share_MAE 0.0441 | 2.66s
+2026-10-13 18:01:51 INFO epoch 054/060 | train 0.20121 | val 0.22315 | P 0.851 R 0.928 F1 0.888 | share_MAE 0.3799 hot_share_MAE 0.0427 | 2.99s
+2026-10-13 18:01:54 INFO epoch 055/060 | train 0.20167 | val 0.20758 | P 0.801 R 0.939 F1 0.864 | share_MAE 0.3860 hot_share_MAE 0.0436 | 2.70s
+2026-10-13 18:01:54 INFO   saved new best checkpoint (validation loss 0.20758)
+2026-10-13 18:01:56 INFO epoch 056/060 | train 0.19890 | val 0.21478 | P 0.805 R 0.940 F1 0.867 | share_MAE 0.4056 hot_share_MAE 0.0455 | 2.79s
+2026-10-13 18:01:59 INFO epoch 057/060 | train 0.19745 | val 0.20963 | P 0.758 R 0.941 F1 0.839 | share_MAE 0.4022 hot_share_MAE 0.0450 | 2.53s
+2026-10-13 18:02:02 INFO epoch 058/060 | train 0.19799 | val 0.21045 | P 0.792 R 0.932 F1 0.856 | share_MAE 0.3915 hot_share_MAE 0.0431 | 2.63s
+2026-10-13 18:02:04 INFO epoch 059/060 | train 0.20036 | val 0.20395 | P 0.838 R 0.933 F1 0.883 | share_MAE 0.3783 hot_share_MAE 0.0438 | 2.49s
+2026-10-13 18:02:04 INFO   saved new best checkpoint (validation loss 0.20395)
+2026-10-13 18:02:07 INFO epoch 060/060 | train 0.19564 | val 0.21804 | P 0.791 R 0.935 F1 0.857 | share_MAE 0.3985 hot_share_MAE 0.0424 | 2.59s
+2026-10-13 18:02:07 INFO training complete
+2026-10-13 18:02:07 INFO {
+  "device": "cuda",
+  "epochs_completed": 60,
+  "best_epoch": 59,
+  "best_validation_loss": 0.20394638878879723,
+  "positive_class_weight": 11.397958755493164,
+  "model_parameters": 5058,
+  "validation": {
+    "accuracy": 0.9799768518518519,
+    "precision": 0.8376288659793815,
+    "recall": 0.9325681492109039,
+    "f1": 0.8825526137135098,
+    "get_share_mae": 0.3782782256603241,
+    "hotspot_get_share_mae": 0.04382471740245819,
+    "true_positive": 1300,
+    "false_positive": 252,
+    "false_negative": 94,
+    "true_negative": 15634,
+    "loss": 0.20394638878879723
+  },
+  "test": {
+    "accuracy": 0.9806134259259259,
+    "precision": 0.8403361344537815,
+    "recall": 0.9365994236311239,
+    "f1": 0.8858603066439524,
+    "get_share_mae": 0.3783579170703888,
+    "hotspot_get_share_mae": 0.043371204286813736,
+    "true_positive": 1300,
+    "false_positive": 247,
+    "false_negative": 88,
+    "true_negative": 15645,
+    "loss": 0.19438127123371318
+  },
+  "test_by_pattern": {
+    "burst": {
+      "accuracy": 0.971875,
+      "precision": 0.5619834710743802,
+      "recall": 0.7083333333333334,
+      "f1": 0.6267281105990784,
+      "get_share_mae": 0.35291722416877747,
+      "hotspot_get_share_mae": 0.05357341468334198,
+      "true_positive": 68,
+      "false_positive": 53,
+      "false_negative": 28,
+      "true_negative": 2731
+    },
+    "gradual": {
+      "accuracy": 0.9920138888888889,
+      "precision": 0.9204545454545454,
+      "recall": 0.9918367346938776,
+      "f1": 0.9548133595284873,
+      "get_share_mae": 0.3604918122291565,
+      "hotspot_get_share_mae": 0.06259371340274811,
+      "true_positive": 243,
+      "false_positive": 21,
+      "false_negative": 2,
+      "true_negative": 2614
+    },
+    "ramp": {
+      "accuracy": 0.99375,
+      "precision": 0.9104477611940298,
+      "recall": 1.0,
+      "f1": 0.953125,
+      "get_share_mae": 0.3630146384239197,
+      "hotspot_get_share_mae": 0.05303105711936951,
+      "true_positive": 183,
+      "false_positive": 18,
+      "false_negative": 0,
+      "true_negative": 2679
+    },
+    "random": {
+      "accuracy": 0.9600694444444444,
+      "precision": 0.7711598746081505,
+      "recall": 0.8541666666666666,
+      "f1": 0.8105436573311366,
+      "get_share_mae": 0.3803497850894928,
+      "hotspot_get_share_mae": 0.04139198735356331,
+      "true_positive": 246,
+      "false_positive": 73,
+      "false_negative": 42,
+      "true_negative": 2519
+    },
+    "stable": {
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "get_share_mae": 0.43821635842323303,
+      "hotspot_get_share_mae": 0.025883954018354416,
+      "true_positive": 288,
+      "false_positive": 0,
+      "false_negative": 0,
+      "true_negative": 2592
+    },
+    "step": {
+      "accuracy": 0.9659722222222222,
+      "precision": 0.768361581920904,
+      "recall": 0.9444444444444444,
+      "f1": 0.8473520249221184,
+      "get_share_mae": 0.37515780329704285,
+      "hotspot_get_share_mae": 0.03694641590118408,
+      "true_positive": 272,
+      "false_positive": 82,
+      "false_negative": 16,
+      "true_negative": 2510
+    }
+  }
+}
+2026-10-13 18:02:07 INFO checkpoint=models\lstm\conditional-hotspot\hotbucket_lstm.pt

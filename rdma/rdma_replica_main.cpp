@@ -1,0 +1,249 @@
+#include "hotbucket/entity_memory.hpp"
+#include "hotbucket/rdma_replication.hpp"
+#include "hotbucket/replica_bundle.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+struct Options {
+    std::string mode;
+    std::string server_ip;
+    std::uint16_t port{7600};
+    std::size_t node_id{0};
+    std::size_t maximum_replications{1};
+    std::size_t maximum_bundle_bytes{64U * 1024U * 1024U};
+    std::size_t bucket_id{43};
+    std::size_t target_node{0};
+    std::size_t expires_after_window{3};
+    std::size_t entity_count{10};
+    std::size_t bucket_count{64};
+    std::size_t node_count{5};
+    std::size_t node_memory_bytes{2048};
+    std::size_t staging_bytes{hotbucket::kDefaultRdmaStagingBytes};
+    std::size_t payload_bytes{0};
+    std::size_t warmup_count{0};
+    std::size_t repeat_count{1};
+};
+
+std::string RequireValue(int& index, int argc, char** argv) {
+    if (index + 1 >= argc) {
+        throw std::invalid_argument(std::string("missing value for ") + argv[index]);
+    }
+    return argv[++index];
+}
+
+unsigned long long ParseUnsigned(const std::string& text, const char* name) {
+    if (text.empty() || text.front() == '-') {
+        throw std::invalid_argument(std::string(name) + " must be a non-negative integer");
+    }
+    std::size_t consumed = 0;
+    const auto value = std::stoull(text, &consumed, 10);
+    if (consumed != text.size()) {
+        throw std::invalid_argument(std::string(name) + " must contain digits only");
+    }
+    return value;
+}
+
+std::size_t ParseSize(const std::string& text, const char* name) {
+    const auto value = ParseUnsigned(text, name);
+    if (value > std::numeric_limits<std::size_t>::max()) {
+        throw std::out_of_range(std::string(name) + " exceeds size_t");
+    }
+    return static_cast<std::size_t>(value);
+}
+
+std::uint16_t ParsePort(const std::string& text) {
+    const auto value = ParseUnsigned(text, "port");
+    if (value == 0 || value > std::numeric_limits<std::uint16_t>::max()) {
+        throw std::out_of_range("port must be between 1 and 65535");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+void PrintUsage() {
+    std::cout
+        << "Usage:\n"
+        << "  hotbucket_rdma_replica server [options]\n"
+        << "  hotbucket_rdma_replica client --server IP [options]\n\n"
+        << "Server options:\n"
+        << "  --port N --node-id N --max-replications N --max-bundle-bytes N\n"
+        << "Client options:\n"
+        << "  --server IP --port N --bucket N --target-node N\n"
+        << "  --expires-after-window N --entities N --buckets N --nodes N\n"
+        << "  --node-memory-bytes N --staging-bytes N --repeat N\n"
+        << "Calibration client options:\n"
+        << "  --payload-bytes N --warmup N --repeat N\n";
+}
+
+Options ParseArguments(int argc, char** argv) {
+    if (argc < 2) {
+        PrintUsage();
+        throw std::invalid_argument("mode must be server or client");
+    }
+    Options options;
+    options.mode = argv[1];
+    for (int index = 2; index < argc; ++index) {
+        const std::string argument = argv[index];
+        if (argument == "--server") {
+            options.server_ip = RequireValue(index, argc, argv);
+        } else if (argument == "--port") {
+            options.port = ParsePort(RequireValue(index, argc, argv));
+        } else if (argument == "--node-id") {
+            options.node_id = ParseSize(RequireValue(index, argc, argv), "node-id");
+        } else if (argument == "--max-replications") {
+            options.maximum_replications =
+                ParseSize(RequireValue(index, argc, argv), "max-replications");
+        } else if (argument == "--max-bundle-bytes") {
+            options.maximum_bundle_bytes =
+                ParseSize(RequireValue(index, argc, argv), "max-bundle-bytes");
+        } else if (argument == "--bucket") {
+            options.bucket_id = ParseSize(RequireValue(index, argc, argv), "bucket");
+        } else if (argument == "--target-node") {
+            options.target_node =
+                ParseSize(RequireValue(index, argc, argv), "target-node");
+        } else if (argument == "--expires-after-window") {
+            options.expires_after_window =
+                ParseSize(RequireValue(index, argc, argv), "expires-after-window");
+        } else if (argument == "--entities") {
+            options.entity_count = ParseSize(RequireValue(index, argc, argv), "entities");
+        } else if (argument == "--buckets") {
+            options.bucket_count = ParseSize(RequireValue(index, argc, argv), "buckets");
+        } else if (argument == "--nodes") {
+            options.node_count = ParseSize(RequireValue(index, argc, argv), "nodes");
+        } else if (argument == "--node-memory-bytes") {
+            options.node_memory_bytes =
+                ParseSize(RequireValue(index, argc, argv), "node-memory-bytes");
+        } else if (argument == "--staging-bytes") {
+            options.staging_bytes =
+                ParseSize(RequireValue(index, argc, argv), "staging-bytes");
+        } else if (argument == "--payload-bytes") {
+            options.payload_bytes =
+                ParseSize(RequireValue(index, argc, argv), "payload-bytes");
+        } else if (argument == "--warmup") {
+            options.warmup_count =
+                ParseSize(RequireValue(index, argc, argv), "warmup");
+        } else if (argument == "--repeat") {
+            options.repeat_count = ParseSize(RequireValue(index, argc, argv), "repeat");
+        } else if (argument == "--help") {
+            PrintUsage();
+            std::exit(0);
+        } else {
+            throw std::invalid_argument("unknown argument: " + argument);
+        }
+    }
+    return options;
+}
+
+hotbucket::ReplicaBundle MakeCalibrationBundle(const Options& options) {
+    if (options.payload_bytes == 0) {
+        throw std::invalid_argument("payload-bytes must be positive");
+    }
+    if (options.payload_bytes > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("payload-bytes exceeds the replica wire format");
+    }
+
+    std::vector<std::uint8_t> payload(options.payload_bytes);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::uint8_t>((index * 131U + 17U) & 0xffU);
+    }
+
+    hotbucket::ReplicaBundle bundle;
+    bundle.bucket_id = options.bucket_id;
+    bundle.target_node = options.target_node;
+    bundle.expires_after_window = options.expires_after_window;
+    bundle.records.push_back(hotbucket::ReplicaRecord{
+        900000U + static_cast<std::uint64_t>(options.bucket_id),
+        options.target_node + 1U,
+        payload.size(),
+        payload.size(),
+        std::move(payload),
+    });
+    return bundle;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        const Options options = ParseArguments(argc, argv);
+        if (options.mode == "server") {
+            hotbucket::RunRdmaReplicaServer(
+                options.port,
+                options.node_id,
+                options.maximum_replications,
+                options.maximum_bundle_bytes);
+        } else if (options.mode == "client") {
+            if (options.server_ip.empty()) {
+                throw std::invalid_argument("client mode requires --server IP");
+            }
+            hotbucket::ReplicaBundle bundle;
+            if (options.payload_bytes > 0) {
+                bundle = MakeCalibrationBundle(options);
+            } else {
+                const auto entities = hotbucket::MakeBattlefieldScenario(options.entity_count);
+                hotbucket::EntityMemoryCluster memory_cluster(
+                    options.node_count,
+                    options.bucket_count,
+                    options.node_memory_bytes);
+                memory_cluster.Allocate(entities);
+                bundle = memory_cluster.BuildReplicaBundle(
+                    options.bucket_id,
+                    options.target_node,
+                    options.expires_after_window);
+            }
+            const auto encoded = hotbucket::EncodeReplicaBundle(bundle);
+            if (options.repeat_count == 0) {
+                throw std::invalid_argument("repeat must be positive");
+            }
+            hotbucket::RdmaReplicaSession session(
+                options.server_ip,
+                options.port,
+                options.target_node,
+                std::max(options.staging_bytes, encoded.size()));
+            std::cout << "replica_session_connected target_node="
+                      << options.target_node
+                      << " staging_bytes=" << session.staging_bytes()
+                      << " setup_ms=" << session.setup_ms() << '\n';
+            if (options.payload_bytes > 0) {
+                std::cout << "calibration_bundle payload_bytes=" << options.payload_bytes
+                          << " encoded_bytes=" << encoded.size() << '\n';
+            }
+            for (std::size_t iteration = 0; iteration < options.warmup_count;
+                 ++iteration) {
+                static_cast<void>(session.Replicate(encoded));
+            }
+            if (options.warmup_count > 0) {
+                std::cout << "replication_warmup_complete count="
+                          << options.warmup_count << '\n';
+            }
+            for (std::size_t iteration = 0; iteration < options.repeat_count;
+                 ++iteration) {
+                const auto result = session.Replicate(encoded);
+                std::cout << "replication_complete bucket=" << result.bucket_id
+                          << " target_node=" << result.target_node
+                          << " iteration=" << (iteration + 1U)
+                          << " sequence=" << result.sequence_number
+                          << " records=" << bundle.records.size()
+                          << " bytes=" << result.transferred_bytes
+                          << " write_completion_ms=" << result.write_completion_ms
+                          << " end_to_end_ms=" << result.end_to_end_ms
+                          << " provider=" << result.provider << '\n';
+            }
+        } else {
+            throw std::invalid_argument("mode must be server or client");
+        }
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "error: " << error.what() << '\n';
+        return 1;
+    }
+}

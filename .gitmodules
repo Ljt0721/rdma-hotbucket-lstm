@@ -1,3 +1,18 @@
 [submodule "third_party/rdma_bench"]
 	path = third_party/rdma_bench
 	url = https://github.com/efficient/rdma_bench.git
+[submodule "third_party/rdma-basic-tutorial"]
+	path = third_party/rdma-basic-tutorial
+	url = https://github.com/Ljt0721/rdma-basic-tutorial.git
+[submodule "third_party/dinomo-reference"]
+	path = third_party/dinomo-reference
+	url = https://github.com/utsaslab/dinomo.git
+[submodule "third_party/querybot5000-reference"]
+	path = third_party/querybot5000-reference
+	url = https://github.com/malin1993ml/QueryBot5000.git
+[submodule "third_party/pytorch-examples-reference"]
+	path = third_party/pytorch-examples-reference
+	url = https://github.com/pytorch/examples.git
+[submodule "third_party/time-series-benchmark-reference"]
+	path = third_party/time-series-benchmark-reference
+	url = https://github.com/Vicen-te/time-series-benchmark.git

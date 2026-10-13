@@ -1,0 +1,47 @@
+{
+  "selection_data": "validation windows only",
+  "evaluation_start_fraction": 0.7,
+  "evaluation_end_fraction": 0.85,
+  "best": {
+    "minimum_probability": 0.5,
+    "minimum_predicted_get_ratio": 0.0,
+    "mean_completion_ms": 14709.794958333334,
+    "mean_improvement_vs_no_action_pct": 70.62362643650172,
+    "mean_improvement_vs_recent_pct": 3.808528025968517,
+    "mean_copies": 9.333333333333334,
+    "wins_vs_recent": 19,
+    "traces": 48
+  },
+  "trials": [
+    {
+      "minimum_probability": 0.5,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 14709.794958333334,
+      "mean_improvement_vs_no_action_pct": 70.62362643650172,
+      "mean_improvement_vs_recent_pct": 3.808528025968517,
+      "mean_copies": 9.333333333333334,
+      "wins_vs_recent": 19,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.6,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 14711.023916666667,
+      "mean_improvement_vs_no_action_pct": 70.6316657328371,
+      "mean_improvement_vs_recent_pct": 3.7714560619607487,
+      "mean_copies": 9.104166666666666,
+      "wins_vs_recent": 18,
+      "traces": 48
+    },
+    {
+      "minimum_probability": 0.7,
+      "minimum_predicted_get_ratio": 0.0,
+      "mean_completion_ms": 14722.862895833334,
+      "mean_improvement_vs_no_action_pct": 70.79507424934097,
+      "mean_improvement_vs_recent_pct": 4.655626739523418,
+      "mean_copies": 8.729166666666666,
+      "wins_vs_recent": 15,
+      "traces": 48
+    }
+  ]
+}

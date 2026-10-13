@@ -1,0 +1,22 @@
+{
+  "name": "hotbucket-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "server": "node server/index.mjs",
+    "vite": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "verify:live": "node scripts/verify-live.mjs",
+    "start": "node server/index.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {}
+}
