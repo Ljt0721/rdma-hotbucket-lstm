@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 const initialSettings = {
+  mode: "local",
   policy: "recent-window",
   nodes: 5,
   buckets: 64,
@@ -323,6 +324,7 @@ export default function App() {
   const [message, setMessage] = useState("Ready");
   const [debugLogs, setDebugLogs] = useState([]);
   const [logEndpoint, setLogEndpoint] = useState("/api/logs");
+  const [rdmaHealth, setRdmaHealth] = useState(null);
   const sourceRef = useRef(null);
 
   useEffect(() => {
@@ -347,6 +349,26 @@ export default function App() {
       sourceRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (settings.mode !== "rdma") {
+      setRdmaHealth(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setRdmaHealth({ checking: true });
+    fetch("/api/rdma/health", { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json();
+        setRdmaHealth(payload);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") {
+          setRdmaHealth({ ok: false, error: error.message });
+        }
+      });
+    return () => controller.abort();
+  }, [settings.mode]);
 
   const hotBucket = latest?.buckets?.find((bucket) => bucket.id === latest.hotBucket);
   const progress = latest ? ((latest.windowId + 1) / latest.windowCount) * 100 : 0;
@@ -373,6 +395,10 @@ export default function App() {
     setSettings((current) => ({ ...current, policy }));
   }
 
+  function selectMode(mode) {
+    setSettings((current) => ({ ...current, mode }));
+  }
+
   function stopRun() {
     sourceRef.current?.close();
     sourceRef.current = null;
@@ -386,7 +412,7 @@ export default function App() {
     setLatest(null);
     setDebugLogs([]);
     setStatus("running");
-    setMessage("Starting simulator");
+    setMessage(settings.mode === "rdma" ? "Connecting to both VMs" : "Starting simulator");
 
     const params = new URLSearchParams(
       Object.entries(settings).map(([key, value]) => [key, String(value)]),
@@ -398,9 +424,19 @@ export default function App() {
       const payload = JSON.parse(event.data);
       if (payload.type === "started") {
         setLogEndpoint(payload.logEndpoint || "/api/logs");
-        appendDebug("INFO", `Run ${payload.runId} started with child simulator`);
+        appendDebug(
+          "INFO",
+          payload.mode === "rdma"
+            ? `Run ${payload.runId} started on the compute VM`
+            : `Run ${payload.runId} started with the local simulator`,
+        );
         appendDebug("INFO", `${payload.policy}, ${payload.nodes} nodes, ${payload.entities} entities`);
         setMessage(`${policyLabels[payload.policy]} · ${payload.nodes} nodes · ${payload.entities} entities`);
+      } else if (payload.type === "rdma-status") {
+        appendDebug("INFO", payload.message);
+        setMessage(payload.message);
+      } else if (payload.type === "rdma-log") {
+        appendDebug(payload.level || "INFO", payload.message);
       } else if (payload.type === "placement") {
         setPlacement(payload);
         const allocated = payload.nodes?.flatMap((node) => node.entities) || [];
@@ -420,7 +456,7 @@ export default function App() {
         const copyMatchedHotspot = copiedBucket === payload.hotBucket;
         appendDebug(
           payload.copyApplied ? (copyMatchedHotspot ? "INFO" : "WARN") : "DEBUG",
-          `W${payload.windowId + 1}: hot bucket ${payload.hotBucket}, load ${formatNumber(payload.maxLoadRatio * 100, 1)}%${payload.copyApplied ? `; copied bucket ${copiedBucket} to node ${payload.decision?.targetNode}${copyMatchedHotspot ? "" : " (stale prediction)"}` : ""}`,
+          `W${payload.windowId + 1}: hot bucket ${payload.hotBucket}, load ${formatNumber(payload.maxLoadRatio * 100, 1)}%${payload.copyApplied ? `; copied bucket ${copiedBucket} to node ${payload.decision?.targetNode}${payload.rdmaCopy ? ` with RDMA sequence ${payload.rdmaSequence}` : ""}${copyMatchedHotspot ? "" : " (stale prediction)"}` : ""}`,
         );
         setMessage(`Window ${payload.windowId + 1} of ${payload.windowCount}`);
       } else if (payload.type === "memory") {
@@ -440,7 +476,7 @@ export default function App() {
       } else if (payload.type === "complete") {
         appendDebug("INFO", `Completed with ${payload.copies ?? 0} copies in ${formatNumber(payload.totalCompletionMs, 2)} ms`);
         setStatus("complete");
-        setMessage(`Complete · CSV saved to ${payload.csv || "results/dashboard"}`);
+        setMessage(`Complete · CSV: ${payload.csv || "results/dashboard"}`);
         source.close();
         sourceRef.current = null;
       } else if (payload.type === "error") {
@@ -467,7 +503,7 @@ export default function App() {
           <Database size={22} />
           <div>
             <h1>Hot-Bucket Replication Monitor</h1>
-            <span>Cost-aware KV workload simulator</span>
+            <span>Local simulation and Soft-RoCE experiment controller</span>
           </div>
         </div>
         <div className="run-state">
@@ -476,7 +512,9 @@ export default function App() {
             <strong>{status === "running" ? "RUNNING" : status.toUpperCase()}</strong>
             <span>{message}</span>
           </div>
-          <span className="simulation-tag">SIMULATION</span>
+          <span className={`simulation-tag ${settings.mode === "rdma" ? "rdma" : ""}`}>
+            {settings.mode === "rdma" ? "REAL RDMA" : "SIMULATION"}
+          </span>
         </div>
       </header>
 
@@ -485,6 +523,47 @@ export default function App() {
           <div className="panel-title">
             <h2>Run configuration</h2>
             <span>Seed {settings.seed}</span>
+          </div>
+
+          <div className="control-group">
+            <label className="group-label">Execution mode</label>
+            <div className="segment-control mode-control">
+              <button
+                type="button"
+                className={settings.mode === "local" ? "active" : ""}
+                onClick={() => selectMode("local")}
+                disabled={status === "running"}
+              >
+                Local simulation
+              </button>
+              <button
+                type="button"
+                className={settings.mode === "rdma" ? "active" : ""}
+                onClick={() => selectMode("rdma")}
+                disabled={status === "running"}
+              >
+                Real RDMA
+              </button>
+            </div>
+            {settings.mode === "rdma" && (
+              <div className={`rdma-health ${rdmaHealth?.ok ? "ready" : rdmaHealth?.checking ? "checking" : "error"}`}>
+                <strong>
+                  {rdmaHealth?.checking
+                    ? "Checking both VMs"
+                    : rdmaHealth?.ok
+                      ? "Both VMs ready"
+                      : "VMs not ready"}
+                </strong>
+                <span>
+                  {rdmaHealth?.ok
+                    ? `${rdmaHealth.memory?.host} · ${rdmaHealth.client?.host}`
+                    : rdmaHealth?.error
+                      || rdmaHealth?.memory?.error
+                      || rdmaHealth?.client?.error
+                      || "Power on both Ubuntu VMs first."}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="control-group">
@@ -540,7 +619,8 @@ export default function App() {
             </button>
           ) : (
             <button type="button" className="run-button" onClick={startRun}>
-              <Play size={18} fill="currentColor" /> Start simulation
+              <Play size={18} fill="currentColor" />
+              {settings.mode === "rdma" ? "Start RDMA run" : "Start simulation"}
             </button>
           )}
         </aside>
@@ -552,7 +632,17 @@ export default function App() {
             <Metric icon={Flame} label="Current hot bucket" value={latest ? `#${latest.hotBucket}` : "-"} detail={hotBucket ? `${formatNumber(hotBucket.gets)} GET · Node ${hotBucket.homeNode}` : "No active window"} tone="red" />
             <Metric icon={Gauge} label="Maximum node load" value={latest ? `${formatNumber(latest.maxLoadRatio * 100, 1)}%` : "-"} detail={latest?.maxLoadRatio > 1 ? "Capacity exceeded" : "Within capacity"} tone={latest?.maxLoadRatio > 1 ? "red" : "green"} />
             <Metric icon={Activity} label="Simulated throughput" value={latest ? `${formatNumber(throughput / 1000, 1)}K` : "-"} detail="logical ops / second" tone="blue" />
-            <Metric icon={Copy} label="Copies applied" value={latest ? formatNumber(latest.copies) : "-"} detail={latest ? `${formatNumber(latest.copyCostMs, 2)} ms current cost` : "No decisions"} tone="amber" />
+            <Metric
+              icon={Copy}
+              label="Copies applied"
+              value={latest ? formatNumber(latest.copies) : "-"}
+              detail={latest?.rdmaCopy
+                ? `S${latest.rdmaSequence} · WRITE ${formatNumber(latest.rdmaWriteMs, 2)} ms · ACK ${formatNumber(latest.rdmaEndToEndMs, 2)} ms`
+                : latest
+                  ? `${formatNumber(latest.copyCostMs, 2)} ms current cost`
+                  : "No decisions"}
+              tone="amber"
+            />
           </section>
 
           <EntityMemoryAllocation
@@ -631,7 +721,7 @@ export default function App() {
                         <td>W{entry.windowId + 1}</td>
                         <td>#{entry.hotBucket}</td>
                         <td className={entry.maxLoadRatio > 1 ? "danger-text" : ""}>{formatNumber(entry.maxLoadRatio * 100, 1)}%</td>
-                        <td>{entry.copyApplied ? `→ N${entry.decision?.targetNode}` : "-"}</td>
+                        <td>{entry.copyApplied ? `→ N${entry.decision?.targetNode}${entry.rdmaCopy ? ` · S${entry.rdmaSequence}` : ""}` : "-"}</td>
                         <td>{formatNumber(entry.windowCompletionMs, 2)} ms</td>
                       </tr>
                     ))}

@@ -144,12 +144,16 @@ The validation-only gate correction and fresh-seed confirmation are recorded in
 
 ## Live dashboard
 
-The dashboard streams each completed simulator window through a local Server-Sent Events endpoint.
-It displays logical node load, hot-bucket movement, GET/PUT activity, copy decisions, and simulated
-completion time. It displays the `EntityID -> bucket -> node -> memory offset` placement for ten
-battlefield entities and updates the five node pools after every window. Temporary copies occupy
-new byte ranges, show their expiry window, and disappear when their TTL ends. It is a view of the
-current mathematical simulator, not physical RDMA traffic.
+The dashboard streams each completed window through a local Server-Sent Events endpoint. It
+displays logical node load, hot-bucket movement, GET/PUT activity, copy decisions, and the
+`EntityID -> bucket -> node -> memory offset` placement for ten battlefield entities. Temporary
+copies occupy new byte ranges, show their expiry window, and disappear when their TTL ends.
+
+The **Local simulation** mode runs the Windows mathematical simulator. The **Real RDMA** mode uses
+SSH to control the two Ubuntu VMs, starts one persistent Soft-RoCE replica service for each logical
+memory node, and runs the compute-side simulator on the client VM. In this mode the displayed copy
+sequence, RDMA WRITE time, and end-to-end acknowledgement time come from real `libibverbs`
+operations. A failed VM check stops the run; it does not silently fall back to simulation.
 
 On Windows, the complete start command is:
 
@@ -169,6 +173,31 @@ npm run dev
 
 The React development server uses port `5173`; the local simulation API uses port `8787`. Every run
 also writes its full CSV data under `results/dashboard/`.
+
+### Real RDMA dashboard mode
+
+Power on both Ubuntu VMs before selecting **Real RDMA**. VMware may be minimized after the guests
+have booted, but the VMs must remain running rather than suspended. The default SSH aliases are
+`rdma-memory` and `rdma-client`, and key-based non-interactive login must work from Windows:
+
+```powershell
+ssh -o BatchMode=yes rdma-memory "hostname"
+ssh -o BatchMode=yes rdma-client "hostname"
+```
+
+The VM binaries must already exist at
+`/home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_replica` and
+`/home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_sim`. The dashboard reports both VM checks
+in the status panel. It then starts and stops the memory services itself when **Start RDMA run** is
+pressed. Readiness can also be checked directly at:
+
+```text
+http://127.0.0.1:8787/api/rdma/health
+```
+
+The defaults can be changed before starting the dashboard with `RDMA_MEMORY_HOST`,
+`RDMA_CLIENT_HOST`, `RDMA_MEMORY_IP`, `RDMA_REMOTE_ROOT`, `RDMA_REMOTE_BUILD`, and
+`RDMA_BASE_PORT` environment variables.
 
 ### Debug logs
 

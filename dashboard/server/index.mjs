@@ -28,6 +28,90 @@ const executableCandidates = [
   ...executableNames.map((name) => path.join(projectRoot, "build-release", name)),
 ].filter(Boolean);
 
+const sshExecutable = process.env.SSH_PATH || "ssh";
+const rdmaConfig = {
+  memoryHost: process.env.RDMA_MEMORY_HOST || "rdma-memory",
+  clientHost: process.env.RDMA_CLIENT_HOST || "rdma-client",
+  memoryIp: process.env.RDMA_MEMORY_IP || "192.168.64.128",
+  remoteRoot: process.env.RDMA_REMOTE_ROOT || "/home/ljt/rdma-hotbucket-lab",
+  buildDirectory: process.env.RDMA_REMOTE_BUILD || "build-test",
+  basePort: Number(process.env.RDMA_BASE_PORT || 7600),
+};
+
+function remoteBinary(name) {
+  return `${rdmaConfig.remoteRoot}/${rdmaConfig.buildDirectory}/${name}`;
+}
+
+function sshArgs(host, command) {
+  return [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=2",
+    host,
+    command,
+  ];
+}
+
+function runCommand(executable, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(executable, args, {
+      windowsHide: true,
+      timeout: 10000,
+      maxBuffer: 1024 * 1024,
+      ...options,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || stdout.trim() || error.message));
+        return;
+      }
+      resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+  });
+}
+
+async function inspectRdmaHost(role, host, requiredBinary) {
+  const command = [
+    `test -x ${requiredBinary}`,
+    "command -v rdma >/dev/null",
+    "rdma link show",
+  ].join(" && ");
+  try {
+    const result = await runCommand(sshExecutable, sshArgs(host, command));
+    return {
+      role,
+      host,
+      ok: true,
+      provider: result.stdout || "RDMA link available",
+    };
+  } catch (error) {
+    return { role, host, ok: false, error: error.message };
+  }
+}
+
+async function inspectRdmaEnvironment() {
+  const [memory, client] = await Promise.all([
+    inspectRdmaHost(
+      "memory",
+      rdmaConfig.memoryHost,
+      remoteBinary("hotbucket_rdma_replica"),
+    ),
+    inspectRdmaHost(
+      "compute",
+      rdmaConfig.clientHost,
+      remoteBinary("hotbucket_rdma_sim"),
+    ),
+  ]);
+  return {
+    ok: memory.ok && client.ok,
+    memory,
+    client,
+    memoryIp: rdmaConfig.memoryIp,
+    basePort: rdmaConfig.basePort,
+    buildDirectory: rdmaConfig.buildDirectory,
+  };
+}
+
 function simulatorPath() {
   return executableCandidates.find((candidate) => existsSync(candidate));
 }
@@ -89,7 +173,9 @@ function decimalParam(params, name, fallback, minimum, maximum) {
 }
 
 function sendEvent(response, payload) {
+  if (!response.destroyed && !response.writableEnded) {
     response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  }
 }
 
 function placementSettings(url) {
@@ -102,6 +188,27 @@ function placementSettings(url) {
 
 function nodeMemoryBytes(nodes, entities) {
   return Math.max(2048, Math.ceil(entities / nodes) * 1024);
+}
+
+function simulationSettings(url) {
+  const params = url.searchParams;
+  const allowedPolicies = new Set(["no-action", "reactive", "recent-window"]);
+  const requestedPolicy = params.get("policy") || "recent-window";
+  return {
+    policy: allowedPolicies.has(requestedPolicy) ? requestedPolicy : "recent-window",
+    nodes: integerParam(params, "nodes", 5, 2, 16),
+    buckets: integerParam(params, "buckets", 64, 8, 512),
+    entities: integerParam(params, "entities", 10, 2, 100),
+    windows: integerParam(params, "windows", 40, 5, 200),
+    requests: integerParam(params, "requests", 4000, 100, 1000000),
+    nodeCapacity: integerParam(params, "nodeCapacity", 1800, 100, 1000000),
+    hotspotDuration: integerParam(params, "hotspotDuration", 5, 1, 100),
+    threshold: integerParam(params, "threshold", 1200, 1, 1000000),
+    delay: integerParam(params, "delay", 250, 0, 3000),
+    seed: integerParam(params, "seed", 42, 0, 4294967295),
+    readRatio: decimalParam(params, "readRatio", 0.9, 0, 1),
+    hotspotShare: decimalParam(params, "hotspotShare", 0.65, 0.01, 1),
+  };
 }
 
 function getPlacement(response, url) {
@@ -154,7 +261,282 @@ function getPlacement(response, url) {
   });
 }
 
+function readLines(stream, onLine) {
+  let buffer = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (line.trim()) onLine(line.trim());
+    }
+  });
+  stream.on("end", () => {
+    if (buffer.trim()) onLine(buffer.trim());
+  });
+}
+
+function startReplicaService(nodeId, runId, response) {
+  const servicePort = rdmaConfig.basePort + nodeId;
+  const command = [
+    "exec",
+    remoteBinary("hotbucket_rdma_replica"),
+    "server",
+    "--port", String(servicePort),
+    "--node-id", String(nodeId),
+    "--max-replications", "0",
+  ].join(" ");
+  const child = spawn(
+    sshExecutable,
+    sshArgs(rdmaConfig.memoryHost, command),
+    { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+  );
+
+  const ready = new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`Node ${nodeId} did not become ready on port ${servicePort}.`));
+    }, 15000);
+
+    readLines(child.stdout, (line) => {
+      writeLog("INFO", "rdma_memory_service", { runId, nodeId, message: line });
+      sendEvent(response, { type: "rdma-log", level: "INFO", nodeId, message: line });
+      if (!settled && line.includes("replica_server_ready")) {
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    readLines(child.stderr, (line) => {
+      writeLog("WARN", "rdma_memory_service_stderr", { runId, nodeId, message: line });
+      sendEvent(response, { type: "rdma-log", level: "WARN", nodeId, message: line });
+    });
+    child.on("error", (error) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
+    child.on("close", (code) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error(`Node ${nodeId} service exited with code ${code}.`));
+      }
+    });
+  });
+  return { child, ready, nodeId, servicePort };
+}
+
+function requestRemoteServiceStop(nodeCount) {
+  const commands = [];
+  for (let node = 0; node < nodeCount; node += 1) {
+    const servicePort = rdmaConfig.basePort + node;
+    commands.push(
+      `pkill -TERM -f '[h]otbucket_rdma_replica server --port ${servicePort}' || true`,
+    );
+  }
+  return runCommand(
+    sshExecutable,
+    sshArgs(rdmaConfig.memoryHost, commands.join("; ")),
+    { timeout: 5000 },
+  ).catch(() => null);
+}
+
+async function startRdmaSimulation(request, response, url) {
+  const runId = randomUUID();
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  const settings = simulationSettings(url);
+  const memoryBytes = nodeMemoryBytes(settings.nodes, settings.entities);
+  const services = [];
+  let computeChild = null;
+  let completed = false;
+  let cleaned = false;
+
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (computeChild?.exitCode === null) computeChild.kill();
+    for (const service of services) {
+      if (service.child.exitCode === null) service.child.kill();
+    }
+    void requestRemoteServiceStop(settings.nodes);
+  };
+
+  request.on("close", () => {
+    if (!completed) {
+      writeLog("INFO", "rdma_client_disconnected", { runId });
+      cleanup();
+    }
+  });
+
+  try {
+    sendEvent(response, { type: "rdma-status", state: "checking", message: "Checking both VMs" });
+    const health = await inspectRdmaEnvironment();
+    if (!health.ok) {
+      const failures = [health.memory, health.client]
+        .filter((host) => !host.ok)
+        .map((host) => `${host.host}: ${host.error}`)
+        .join("; ");
+      throw new Error(`RDMA environment is not ready. ${failures}`);
+    }
+
+    sendEvent(response, {
+      type: "rdma-status",
+      state: "starting",
+      message: `Starting ${settings.nodes} memory-node services`,
+      health,
+    });
+    await requestRemoteServiceStop(settings.nodes);
+    for (let node = 0; node < settings.nodes; node += 1) {
+      services.push(startReplicaService(node, runId, response));
+    }
+    await Promise.all(services.map((service) => service.ready));
+
+    const remoteOutput = `/tmp/hotbucket-dashboard-${runId}.csv`;
+    const command = [
+      "exec",
+      remoteBinary("hotbucket_rdma_sim"),
+      "--policy", settings.policy,
+      "--nodes", String(settings.nodes),
+      "--buckets", String(settings.buckets),
+      "--entities", String(settings.entities),
+      "--node-memory-bytes", String(memoryBytes),
+      "--windows", String(settings.windows),
+      "--requests", String(settings.requests),
+      "--node-capacity", String(settings.nodeCapacity),
+      "--hotspot-duration", String(settings.hotspotDuration),
+      "--threshold", String(settings.threshold),
+      "--read-ratio", String(settings.readRatio),
+      "--hotspot-share", String(settings.hotspotShare),
+      "--seed", String(settings.seed),
+      "--window-delay-ms", String(settings.delay),
+      "--rdma-server", rdmaConfig.memoryIp,
+      "--rdma-port-base", String(rdmaConfig.basePort),
+      "--stream-json",
+      "--output", remoteOutput,
+    ].join(" ");
+
+    computeChild = spawn(
+      sshExecutable,
+      sshArgs(rdmaConfig.clientHost, command),
+      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    writeLog("INFO", "rdma_run_started", {
+      runId,
+      childPid: computeChild.pid,
+      policy: settings.policy,
+      nodes: settings.nodes,
+      entities: settings.entities,
+      buckets: settings.buckets,
+      windows: settings.windows,
+      memoryHost: rdmaConfig.memoryHost,
+      clientHost: rdmaConfig.clientHost,
+      memoryIp: rdmaConfig.memoryIp,
+      output: `${rdmaConfig.clientHost}:${remoteOutput}`,
+    });
+    sendEvent(response, {
+      type: "started",
+      mode: "rdma",
+      runId,
+      policy: settings.policy,
+      nodes: settings.nodes,
+      buckets: settings.buckets,
+      entities: settings.entities,
+      windows: settings.windows,
+      output: `${rdmaConfig.clientHost}:${remoteOutput}`,
+      logEndpoint: `/api/logs?runId=${encodeURIComponent(runId)}`,
+    });
+
+    let stderrBuffer = "";
+    readLines(computeChild.stdout, (line) => {
+      try {
+        const payload = JSON.parse(line);
+        if (payload.type === "complete") completed = true;
+        if (payload.type === "placement") {
+          writeLog("INFO", "rdma_entities_allocated", {
+            runId,
+            nodeCount: payload.nodeCount,
+            entityCount: payload.entityCount,
+            usedBytes: payload.totalUsedBytes,
+          });
+        } else if (payload.type === "window") {
+          writeLog(payload.copyApplied ? "INFO" : "DEBUG", "rdma_window_completed", {
+            runId,
+            windowId: payload.windowId,
+            hotBucket: payload.hotBucket,
+            maxLoadRatio: payload.maxLoadRatio,
+            copyApplied: payload.copyApplied,
+            rdmaSequence: payload.rdmaSequence,
+            rdmaWriteMs: payload.rdmaWriteMs,
+            rdmaEndToEndMs: payload.rdmaEndToEndMs,
+          });
+        } else if (payload.type === "complete") {
+          writeLog("INFO", "rdma_run_completed", {
+            runId,
+            copies: payload.copies,
+            totalCompletionMs: payload.totalCompletionMs,
+            remoteCsv: `${rdmaConfig.clientHost}:${remoteOutput}`,
+          });
+          payload.csv = `${rdmaConfig.clientHost}:${remoteOutput}`;
+        }
+        sendEvent(response, { ...payload, runId, mode: "rdma" });
+      } catch {
+        writeLog("WARN", "unparsed_rdma_output", { runId, message: line });
+        sendEvent(response, { type: "rdma-log", level: "WARN", message: line });
+      }
+    });
+    readLines(computeChild.stderr, (line) => {
+      stderrBuffer += `${line}\n`;
+      writeLog("WARN", "rdma_compute_stderr", { runId, message: line });
+      sendEvent(response, { type: "rdma-log", level: "WARN", message: line });
+    });
+    computeChild.on("error", (error) => {
+      writeLog("ERROR", "rdma_compute_spawn_failed", { runId, message: error.message });
+      completed = true;
+      if (!response.destroyed && !response.writableEnded) {
+        sendEvent(response, { type: "error", runId, message: error.message });
+        response.end();
+      }
+      cleanup();
+    });
+    computeChild.on("close", (code) => {
+      if (code !== 0 && !completed) {
+        const message = stderrBuffer.trim() || `Remote simulator exited with code ${code}.`;
+        writeLog("ERROR", "rdma_compute_exited", { runId, exitCode: code, message });
+        sendEvent(response, { type: "error", runId, message });
+      }
+      completed = true;
+      cleanup();
+      if (!response.destroyed && !response.writableEnded) response.end();
+    });
+  } catch (error) {
+    writeLog("ERROR", "rdma_start_failed", { runId, message: error.message });
+    completed = true;
+    cleanup();
+    if (!response.destroyed && !response.writableEnded) {
+      sendEvent(response, { type: "error", runId, message: error.message });
+      response.end();
+    }
+  }
+}
+
 function startSimulation(request, response, url) {
+  if (url.searchParams.get("mode") === "rdma") {
+    void startRdmaSimulation(request, response, url);
+    return;
+  }
   const executable = simulatorPath();
   const runId = randomUUID();
   response.writeHead(200, {
@@ -175,23 +557,22 @@ function startSimulation(request, response, url) {
     return;
   }
 
-  const params = url.searchParams;
-  const allowedPolicies = new Set(["no-action", "reactive", "recent-window"]);
-  const requestedPolicy = params.get("policy") || "recent-window";
-  const policy = allowedPolicies.has(requestedPolicy) ? requestedPolicy : "recent-window";
-  const nodes = integerParam(params, "nodes", 5, 2, 16);
-  const buckets = integerParam(params, "buckets", 64, 8, 512);
-  const entities = integerParam(params, "entities", 10, 2, 100);
+  const {
+    policy,
+    nodes,
+    buckets,
+    entities,
+    windows,
+    requests,
+    nodeCapacity,
+    hotspotDuration,
+    threshold,
+    delay,
+    seed,
+    readRatio,
+    hotspotShare,
+  } = simulationSettings(url);
   const memoryBytes = nodeMemoryBytes(nodes, entities);
-  const windows = integerParam(params, "windows", 40, 5, 200);
-  const requests = integerParam(params, "requests", 4000, 100, 1000000);
-  const nodeCapacity = integerParam(params, "nodeCapacity", 1800, 100, 1000000);
-  const hotspotDuration = integerParam(params, "hotspotDuration", 5, 1, 100);
-  const threshold = integerParam(params, "threshold", 1200, 1, 1000000);
-  const delay = integerParam(params, "delay", 250, 0, 3000);
-  const seed = integerParam(params, "seed", 42, 0, 4294967295);
-  const readRatio = decimalParam(params, "readRatio", 0.9, 0, 1);
-  const hotspotShare = decimalParam(params, "hotspotShare", 0.65, 0.01, 1);
 
   const resultDirectory = path.join(projectRoot, "results", "dashboard");
   mkdirSync(resultDirectory, { recursive: true });
@@ -245,6 +626,7 @@ function startSimulation(request, response, url) {
 
   sendEvent(response, {
     type: "started",
+    mode: "local",
     runId,
     policy,
     nodes,
@@ -340,7 +722,7 @@ function startSimulation(request, response, url) {
   });
 
   request.on("close", () => {
-    if (child.exitCode === null) {
+    if (child.exitCode === null && !completed) {
       writeLog("INFO", "client_disconnected", { runId, childPid: child.pid });
       child.kill();
     }
@@ -393,6 +775,20 @@ const server = createServer((request, response) => {
       runId,
       entries: readRecentLogs(limit, runId),
     }));
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/rdma/health") {
+    void inspectRdmaEnvironment()
+      .then((health) => {
+        response.writeHead(health.ok ? 200 : 503, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        response.end(JSON.stringify(health));
+      })
+      .catch((error) => {
+        response.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ ok: false, error: error.message }));
+      });
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/placement") {

@@ -71,6 +71,7 @@ button { letter-spacing: 0; }
   font-size: 10px;
   font-weight: 700;
 }
+.simulation-tag.rdma { color: #ffb4b4; border-color: #9b4a4a; }
 
 .workspace { display: grid; grid-template-columns: 286px minmax(0, 1fr); min-height: calc(100vh - 72px); }
 
@@ -88,6 +89,7 @@ button { letter-spacing: 0; }
 .group-label { display: block; margin-bottom: 8px; color: #4d5f73; font-size: 11px; font-weight: 700; text-transform: uppercase; }
 
 .segment-control { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #c8d1dc; border-radius: 4px; overflow: hidden; }
+.segment-control.mode-control { grid-template-columns: repeat(2, 1fr); }
 .segment-control button {
   min-height: 38px;
   padding: 4px;
@@ -101,6 +103,24 @@ button { letter-spacing: 0; }
 .segment-control button:last-child { border-right: 0; }
 .segment-control button.active { color: #ffffff; background: #245a78; font-weight: 700; }
 .segment-control button:disabled { cursor: not-allowed; opacity: 0.65; }
+
+.rdma-health {
+  margin-top: 8px;
+  padding: 8px 9px;
+  border-left: 3px solid #be3d3d;
+  background: #fff5f5;
+}
+.rdma-health.ready { border-left-color: #23805d; background: #f1faf6; }
+.rdma-health.checking { border-left-color: #a87520; background: #fff9ed; }
+.rdma-health strong, .rdma-health span { display: block; }
+.rdma-health strong { font-size: 11px; }
+.rdma-health span {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: #667589;
+  font-size: 9px;
+  line-height: 1.35;
+}
 
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 10px; }
 .field { min-width: 0; }
