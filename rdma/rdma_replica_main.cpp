@@ -4,10 +4,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -26,6 +29,8 @@ struct Options {
     std::size_t node_count{5};
     std::size_t node_memory_bytes{2048};
     std::size_t staging_bytes{hotbucket::kDefaultRdmaStagingBytes};
+    std::size_t payload_bytes{0};
+    std::size_t warmup_count{0};
     std::size_t repeat_count{1};
 };
 
@@ -74,7 +79,9 @@ void PrintUsage() {
         << "Client options:\n"
         << "  --server IP --port N --bucket N --target-node N\n"
         << "  --expires-after-window N --entities N --buckets N --nodes N\n"
-        << "  --node-memory-bytes N --staging-bytes N --repeat N\n";
+        << "  --node-memory-bytes N --staging-bytes N --repeat N\n"
+        << "Calibration client options:\n"
+        << "  --payload-bytes N --warmup N --repeat N\n";
 }
 
 Options ParseArguments(int argc, char** argv) {
@@ -118,6 +125,12 @@ Options ParseArguments(int argc, char** argv) {
         } else if (argument == "--staging-bytes") {
             options.staging_bytes =
                 ParseSize(RequireValue(index, argc, argv), "staging-bytes");
+        } else if (argument == "--payload-bytes") {
+            options.payload_bytes =
+                ParseSize(RequireValue(index, argc, argv), "payload-bytes");
+        } else if (argument == "--warmup") {
+            options.warmup_count =
+                ParseSize(RequireValue(index, argc, argv), "warmup");
         } else if (argument == "--repeat") {
             options.repeat_count = ParseSize(RequireValue(index, argc, argv), "repeat");
         } else if (argument == "--help") {
@@ -128,6 +141,33 @@ Options ParseArguments(int argc, char** argv) {
         }
     }
     return options;
+}
+
+hotbucket::ReplicaBundle MakeCalibrationBundle(const Options& options) {
+    if (options.payload_bytes == 0) {
+        throw std::invalid_argument("payload-bytes must be positive");
+    }
+    if (options.payload_bytes > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("payload-bytes exceeds the replica wire format");
+    }
+
+    std::vector<std::uint8_t> payload(options.payload_bytes);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::uint8_t>((index * 131U + 17U) & 0xffU);
+    }
+
+    hotbucket::ReplicaBundle bundle;
+    bundle.bucket_id = options.bucket_id;
+    bundle.target_node = options.target_node;
+    bundle.expires_after_window = options.expires_after_window;
+    bundle.records.push_back(hotbucket::ReplicaRecord{
+        900000U + static_cast<std::uint64_t>(options.bucket_id),
+        options.target_node + 1U,
+        payload.size(),
+        payload.size(),
+        std::move(payload),
+    });
+    return bundle;
 }
 
 }  // namespace
@@ -145,16 +185,21 @@ int main(int argc, char** argv) {
             if (options.server_ip.empty()) {
                 throw std::invalid_argument("client mode requires --server IP");
             }
-            const auto entities = hotbucket::MakeBattlefieldScenario(options.entity_count);
-            hotbucket::EntityMemoryCluster memory_cluster(
-                options.node_count,
-                options.bucket_count,
-                options.node_memory_bytes);
-            memory_cluster.Allocate(entities);
-            const auto bundle = memory_cluster.BuildReplicaBundle(
-                options.bucket_id,
-                options.target_node,
-                options.expires_after_window);
+            hotbucket::ReplicaBundle bundle;
+            if (options.payload_bytes > 0) {
+                bundle = MakeCalibrationBundle(options);
+            } else {
+                const auto entities = hotbucket::MakeBattlefieldScenario(options.entity_count);
+                hotbucket::EntityMemoryCluster memory_cluster(
+                    options.node_count,
+                    options.bucket_count,
+                    options.node_memory_bytes);
+                memory_cluster.Allocate(entities);
+                bundle = memory_cluster.BuildReplicaBundle(
+                    options.bucket_id,
+                    options.target_node,
+                    options.expires_after_window);
+            }
             const auto encoded = hotbucket::EncodeReplicaBundle(bundle);
             if (options.repeat_count == 0) {
                 throw std::invalid_argument("repeat must be positive");
@@ -168,11 +213,24 @@ int main(int argc, char** argv) {
                       << options.target_node
                       << " staging_bytes=" << session.staging_bytes()
                       << " setup_ms=" << session.setup_ms() << '\n';
+            if (options.payload_bytes > 0) {
+                std::cout << "calibration_bundle payload_bytes=" << options.payload_bytes
+                          << " encoded_bytes=" << encoded.size() << '\n';
+            }
+            for (std::size_t iteration = 0; iteration < options.warmup_count;
+                 ++iteration) {
+                static_cast<void>(session.Replicate(encoded));
+            }
+            if (options.warmup_count > 0) {
+                std::cout << "replication_warmup_complete count="
+                          << options.warmup_count << '\n';
+            }
             for (std::size_t iteration = 0; iteration < options.repeat_count;
                  ++iteration) {
                 const auto result = session.Replicate(encoded);
                 std::cout << "replication_complete bucket=" << result.bucket_id
                           << " target_node=" << result.target_node
+                          << " iteration=" << (iteration + 1U)
                           << " sequence=" << result.sequence_number
                           << " records=" << bundle.records.size()
                           << " bytes=" << result.transferred_bytes

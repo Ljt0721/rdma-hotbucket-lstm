@@ -1,0 +1,65 @@
+{
+  "trace_count": 48,
+  "evaluated_windows": 1728,
+  "time_attribution": {
+    "completion_gap_ms": 21939.377199999995,
+    "service_gap_ms": 39320.36160000002,
+    "copy_cost_gap_ms": -17380.98440000001,
+    "inference_gap_ms": 0.0,
+    "mean_completion_gap_ms_per_trace": 457.0703583333332,
+    "mean_service_gap_ms_per_trace": 819.1742000000004,
+    "mean_copy_cost_gap_ms_per_trace": -362.1038416666668,
+    "mean_inference_gap_ms_per_trace": 0.0,
+    "service_share_of_gap": 1.7922277939594395,
+    "copy_cost_share_of_gap": -0.7922277939594389,
+    "inference_share_of_gap": 0.0
+  },
+  "window_comparison": {
+    "lstm_slower_windows": 182,
+    "lstm_faster_windows": 142,
+    "equal_windows": 1404
+  },
+  "recent_window": {
+    "severe_bucket_windows": 1390,
+    "covered_severe_bucket_windows": 1130,
+    "missed_severe_bucket_windows": 260,
+    "copy_events": 397,
+    "useful_copies_within_ttl": 367,
+    "proactive_copies_before_threshold": 7,
+    "wasted_copies_within_ttl": 30,
+    "attempted_but_not_applied": 15,
+    "severe_window_coverage": 0.8129496402877698,
+    "useful_copy_rate": 0.924433249370277
+  },
+  "lstm": {
+    "severe_bucket_windows": 1390,
+    "covered_severe_bucket_windows": 1052,
+    "missed_severe_bucket_windows": 338,
+    "copy_events": 345,
+    "useful_copies_within_ttl": 341,
+    "proactive_copies_before_threshold": 0,
+    "wasted_copies_within_ttl": 4,
+    "attempted_but_not_applied": 14,
+    "severe_window_coverage": 0.7568345323741007,
+    "useful_copy_rate": 0.9884057971014493
+  },
+  "lstm_prediction_gates": {
+    "severe_predictions": 1390.0,
+    "probability_pass_on_severe": 1302.0,
+    "regression_pass_on_severe": 1390.0,
+    "both_gates_pass_on_severe": 1302.0,
+    "classifier_pass_but_regression_blocked_on_severe": 0.0,
+    "severe_prediction_error_sum": -413108.9096069336,
+    "severe_prediction_absolute_error_sum": 671426.8822631836,
+    "severe_onsets": 254.0,
+    "both_gates_pass_on_onset": 167.0,
+    "classifier_pass_but_regression_blocked_on_onset": 0.0,
+    "both_gates_false_positive": 436.0,
+    "probability_recall_on_severe": 0.9366906474820144,
+    "regression_recall_on_severe": 1.0,
+    "combined_gate_recall_on_severe": 0.9366906474820144,
+    "combined_gate_recall_on_onset": 0.65748031496063,
+    "mean_prediction_bias_on_severe_gets": -297.2006543934774,
+    "mae_on_severe_gets": 483.040922491499
+  }
+}

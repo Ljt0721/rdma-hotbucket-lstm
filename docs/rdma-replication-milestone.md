@@ -60,6 +60,10 @@ produce sub-kilobyte physical bundles, whereas earlier simulations assumed a 4 M
 Formal claims require matching payload size and cost-model assumptions and repeating measurements
 on physical RNICs.
 
+The first multi-size persistent-session calibration now measures valid 4 KiB to 4 MiB replica
+bundles and feeds its p50/p95 model directly into policy replay. Results and limitations are in
+[`rdma-cost-calibration.md`](rdma-cost-calibration.md).
+
 ## LSTM training decision
 
 The first formal model has already been trained. Its dataset contains 77,760 training samples with

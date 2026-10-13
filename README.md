@@ -244,6 +244,28 @@ distinguishes pure `rdma_write_ms` from steady-state `rdma_end_to_end_ms` and re
 per-session `rdma_sequence`. CM/QP setup is measured by the standalone client, not charged to every
 bucket copy.
 
+### Calibrate replica cost
+
+With both VMs running and the current binaries built in `build-test`, measure the complete replica
+protocol over several valid bucket sizes:
+
+```powershell
+python scripts/run_rdma_calibration.py
+```
+
+The script uses one persistent session per size, discards warm-up operations, writes raw samples to
+`results/rdma-calibration/measurements.csv`, and writes p50/p95 cost models to
+`results/rdma-calibration/summary.json`. A formal replay can consume the measured model directly:
+
+```powershell
+python scripts/run_formal_evaluation.py `
+  --rdma-calibration results/rdma-calibration/summary.json `
+  --calibration-percentile p50
+```
+
+The first local result and its limitations are recorded in
+[`docs/rdma-cost-calibration.md`](docs/rdma-cost-calibration.md).
+
 With the dashboard running, verify the SSE and dynamic-memory path with:
 
 ```powershell

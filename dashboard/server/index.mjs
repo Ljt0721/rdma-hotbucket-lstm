@@ -36,10 +36,38 @@ const rdmaConfig = {
   remoteRoot: process.env.RDMA_REMOTE_ROOT || "/home/ljt/rdma-hotbucket-lab",
   buildDirectory: process.env.RDMA_REMOTE_BUILD || "build-test",
   basePort: Number(process.env.RDMA_BASE_PORT || 7600),
+  calibrationPath: process.env.RDMA_CALIBRATION_PATH
+    || path.join(projectRoot, "results", "rdma-calibration", "summary.json"),
+  calibrationPercentile: process.env.RDMA_CALIBRATION_PERCENTILE || "p50",
 };
 
 function remoteBinary(name) {
   return `${rdmaConfig.remoteRoot}/${rdmaConfig.buildDirectory}/${name}`;
+}
+
+function inspectRdmaCalibration() {
+  try {
+    const report = JSON.parse(readFileSync(rdmaConfig.calibrationPath, "utf8"));
+    const modelName = `${rdmaConfig.calibrationPercentile}_end_to_end`;
+    const model = report.cost_models?.[modelName];
+    const bandwidth = Number(model?.copy_bandwidth_mib_per_ms);
+    const fixedCost = Number(model?.fixed_cost_ms);
+    if (!(bandwidth > 0) || !(fixedCost >= 0)) {
+      throw new Error(`No usable ${modelName} model.`);
+    }
+    return {
+      ok: true,
+      percentile: rdmaConfig.calibrationPercentile,
+      copyBandwidthMibPerMs: bandwidth,
+      fixedCostMs: fixedCost,
+      source: path.relative(projectRoot, rdmaConfig.calibrationPath),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `${rdmaConfig.calibrationPath}: ${error.message}`,
+    };
+  }
 }
 
 function sshArgs(host, command) {
@@ -102,10 +130,12 @@ async function inspectRdmaEnvironment() {
       remoteBinary("hotbucket_rdma_sim"),
     ),
   ]);
+  const calibration = inspectRdmaCalibration();
   return {
-    ok: memory.ok && client.ok,
+    ok: memory.ok && client.ok && calibration.ok,
     memory,
     client,
+    calibration,
     memoryIp: rdmaConfig.memoryIp,
     basePort: rdmaConfig.basePort,
     buildDirectory: rdmaConfig.buildDirectory,
@@ -387,6 +417,7 @@ async function startRdmaSimulation(request, response, url) {
       const failures = [health.memory, health.client]
         .filter((host) => !host.ok)
         .map((host) => `${host.host}: ${host.error}`)
+        .concat(health.calibration.ok ? [] : [`calibration: ${health.calibration.error}`])
         .join("; ");
       throw new Error(`RDMA environment is not ready. ${failures}`);
     }
@@ -404,6 +435,7 @@ async function startRdmaSimulation(request, response, url) {
     await Promise.all(services.map((service) => service.ready));
 
     const remoteOutput = `/tmp/hotbucket-dashboard-${runId}.csv`;
+    const calibration = health.calibration;
     const command = [
       "exec",
       remoteBinary("hotbucket_rdma_sim"),
@@ -421,6 +453,9 @@ async function startRdmaSimulation(request, response, url) {
       "--hotspot-share", String(settings.hotspotShare),
       "--seed", String(settings.seed),
       "--window-delay-ms", String(settings.delay),
+      "--bucket-size-mib", "0",
+      "--copy-bandwidth-mib-per-ms", String(calibration.copyBandwidthMibPerMs),
+      "--metadata-cost-ms", String(calibration.fixedCostMs),
       "--rdma-server", rdmaConfig.memoryIp,
       "--rdma-port-base", String(rdmaConfig.basePort),
       "--stream-json",
@@ -444,6 +479,7 @@ async function startRdmaSimulation(request, response, url) {
       memoryHost: rdmaConfig.memoryHost,
       clientHost: rdmaConfig.clientHost,
       memoryIp: rdmaConfig.memoryIp,
+      calibration,
       output: `${rdmaConfig.clientHost}:${remoteOutput}`,
     });
     sendEvent(response, {
@@ -456,6 +492,7 @@ async function startRdmaSimulation(request, response, url) {
       entities: settings.entities,
       windows: settings.windows,
       output: `${rdmaConfig.clientHost}:${remoteOutput}`,
+      calibration,
       logEndpoint: `/api/logs?runId=${encodeURIComponent(runId)}`,
     });
 

@@ -169,8 +169,31 @@ def pairwise_results(results: List[Dict[str, object]]) -> List[Dict[str, object]
     return output
 
 
+def apply_rdma_calibration(args: argparse.Namespace) -> None:
+    if args.rdma_calibration is None:
+        return
+    calibration_path = args.rdma_calibration.resolve()
+    report = json.loads(calibration_path.read_text(encoding="utf-8"))
+    model_name = "{}_end_to_end".format(args.calibration_percentile)
+    try:
+        model = report["cost_models"][model_name]
+        bandwidth = float(model["copy_bandwidth_mib_per_ms"])
+        fixed_cost = float(model["fixed_cost_ms"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "calibration file has no usable {} cost model: {}".format(
+                model_name, calibration_path
+            )
+        ) from error
+    if bandwidth <= 0 or fixed_cost < 0:
+        raise ValueError("calibrated bandwidth must be positive and fixed cost non-negative")
+    args.copy_bandwidth_mib_per_ms = bandwidth
+    args.metadata_cost_ms = fixed_cost
+
+
 def run_evaluation(args: argparse.Namespace) -> None:
     root = Path(__file__).resolve().parents[1]
+    apply_rdma_calibration(args)
     executable = args.executable.resolve()
     prediction_file = args.prediction_file.resolve()
     output_dir = args.output_dir.resolve()
@@ -188,8 +211,24 @@ def run_evaluation(args: argparse.Namespace) -> None:
         minimum_lstm_predicted_get_ratio=args.lstm_min_predicted_get_ratio,
         lstm_inference_cost_ms=args.lstm_inference_cost_ms,
         bucket_size_mib=args.bucket_size_mib,
+        copy_bandwidth_mib_per_ms=args.copy_bandwidth_mib_per_ms,
+        metadata_cost_ms=args.metadata_cost_ms,
+        rdma_calibration=(
+            str(args.rdma_calibration.resolve()) if args.rdma_calibration else None
+        ),
+        calibration_percentile=(
+            args.calibration_percentile if args.rdma_calibration else None
+        ),
     )
     logger.info("formal policy evaluation: %d traces x %d policies", len(traces), len(POLICIES))
+    logger.info(
+        "copy cost: %.6f ms fixed + size / %.6f MiB/ms%s",
+        args.metadata_cost_ms,
+        args.copy_bandwidth_mib_per_ms,
+        " ({})".format(args.calibration_percentile)
+        if args.rdma_calibration
+        else "",
+    )
 
     results: List[Dict[str, object]] = []
     for trace_index, trace in enumerate(traces, start=1):
@@ -384,6 +423,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bucket-size-mib", type=float, default=4.0)
     parser.add_argument("--copy-bandwidth-mib-per-ms", type=float, default=1.5)
     parser.add_argument("--metadata-cost-ms", type=float, default=0.08)
+    parser.add_argument("--rdma-calibration", type=Path)
+    parser.add_argument(
+        "--calibration-percentile", choices=("p50", "p95"), default="p50"
+    )
     parser.add_argument("--lstm-min-probability", type=float, default=0.70)
     parser.add_argument("--lstm-min-predicted-get-ratio", type=float, default=1.0)
     parser.add_argument("--lstm-inference-cost-ms", type=float, default=0.0)

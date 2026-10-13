@@ -5,6 +5,12 @@ results/**/*.csv
 results/**/*.log
 results/**/*.jsonl
 !results/.gitkeep
+!results/rdma-calibration/measurements.csv
+!results/rdma-calibration/summary.json
+!results/calibrated-final-confirmation/summary.csv
+!results/calibrated-final-confirmation/aggregate.csv
+!results/calibrated-final-confirmation/pairwise.csv
+results/rdma-calibration-smoke*/
 .idea/
 .vscode/
 *.user

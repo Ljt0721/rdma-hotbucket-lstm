@@ -556,10 +556,11 @@ export default function App() {
                 </strong>
                 <span>
                   {rdmaHealth?.ok
-                    ? `${rdmaHealth.memory?.host} · ${rdmaHealth.client?.host}`
+                    ? `${rdmaHealth.memory?.host} · ${rdmaHealth.client?.host} · ${rdmaHealth.calibration?.percentile} calibrated`
                     : rdmaHealth?.error
                       || rdmaHealth?.memory?.error
                       || rdmaHealth?.client?.error
+                      || rdmaHealth?.calibration?.error
                       || "Power on both Ubuntu VMs first."}
                 </span>
               </div>
