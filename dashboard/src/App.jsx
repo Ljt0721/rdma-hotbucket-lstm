@@ -35,6 +35,7 @@ const policyLabels = {
   "no-action": "No action",
   reactive: "Reactive",
   "recent-window": "Recent window",
+  lstm: "Cost-aware LSTM",
 };
 
 function formatNumber(value, digits = 0) {
@@ -432,7 +433,7 @@ export default function App() {
         );
         appendDebug("INFO", `${payload.policy}, ${payload.nodes} nodes, ${payload.entities} entities`);
         setMessage(`${policyLabels[payload.policy]} · ${payload.nodes} nodes · ${payload.entities} entities`);
-      } else if (payload.type === "rdma-status") {
+      } else if (payload.type === "status" || payload.type === "rdma-status") {
         appendDebug("INFO", payload.message);
         setMessage(payload.message);
       } else if (payload.type === "rdma-log") {
@@ -588,7 +589,7 @@ export default function App() {
             <NumberField label="Nodes" name="nodes" value={settings.nodes} min={2} max={16} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Buckets" name="buckets" value={settings.buckets} min={8} max={512} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Entities" name="entities" value={settings.entities} min={2} max={100} onChange={changeSetting} disabled={status === "running"} />
-            <NumberField label="Windows" name="windows" value={settings.windows} min={5} max={200} onChange={changeSetting} disabled={status === "running"} />
+            <NumberField label="Windows" name="windows" value={settings.windows} min={7} max={200} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Requests / window" name="requests" value={settings.requests} min={100} max={1000000} step={100} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Node capacity" name="nodeCapacity" value={settings.nodeCapacity} min={100} max={1000000} step={100} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Hotspot duration" name="hotspotDuration" value={settings.hotspotDuration} min={1} max={100} onChange={changeSetting} disabled={status === "running"} />

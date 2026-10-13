@@ -89,12 +89,19 @@ def calculate_metrics(
     recall = true_positive / max(1, true_positive + false_negative)
     f1 = 2.0 * precision * recall / max(1e-12, precision + recall)
     accuracy = (true_positive + true_negative) / max(1, labels.size)
+    hotspot_mask = actual
+    hotspot_share_mae = (
+        float(np.mean(np.abs(predicted_share[hotspot_mask] - true_share[hotspot_mask])))
+        if hotspot_mask.any()
+        else 0.0
+    )
     return {
         "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
         "f1": f1,
         "get_share_mae": float(np.mean(np.abs(predicted_share - true_share))),
+        "hotspot_get_share_mae": hotspot_share_mae,
         "true_positive": true_positive,
         "false_positive": false_positive,
         "false_negative": false_negative,
@@ -108,11 +115,14 @@ def hotspot_aware_regression_loss(
     severe_label: torch.Tensor,
     severe_weight: float,
     underprediction_weight: float,
+    conditional_hotspot_only: bool = False,
 ) -> torch.Tensor:
     per_sample = nn.functional.smooth_l1_loss(
         predicted_share, true_share, reduction="none"
     )
     weights = 1.0 + (severe_weight - 1.0) * severe_label
+    if conditional_hotspot_only:
+        weights = weights * severe_label
     severe_underprediction = torch.logical_and(
         severe_label >= 0.5, predicted_share < true_share
     )
@@ -131,6 +141,7 @@ def evaluate(
     regression_weight: float,
     severe_regression_weight: float,
     underprediction_weight: float,
+    conditional_hotspot_regression: bool,
     device: torch.device,
 ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     model.eval()
@@ -152,6 +163,7 @@ def evaluate(
                     y_hot,
                     severe_regression_weight,
                     underprediction_weight,
+                    conditional_hotspot_regression,
                 )
             )
             losses.append(float(loss.item()) * x.shape[0])
@@ -265,6 +277,7 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
                     y_hot,
                     args.severe_regression_weight,
                     args.underprediction_weight,
+                    args.conditional_hotspot_regression,
                 )
             )
             loss.backward()
@@ -280,6 +293,7 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
             args.regression_weight,
             args.severe_regression_weight,
             args.underprediction_weight,
+            args.conditional_hotspot_regression,
             device,
         )
         validation_loss = validation_result[0]
@@ -300,13 +314,16 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
                 "validation_recall": validation_metrics["recall"],
                 "validation_f1": validation_metrics["f1"],
                 "validation_get_share_mae": validation_metrics["get_share_mae"],
+                "validation_hotspot_get_share_mae": validation_metrics[
+                    "hotspot_get_share_mae"
+                ],
                 "epoch_seconds": epoch_seconds,
                 "examples_per_second": examples_per_second,
             }
         )
         logger.info(
             "epoch %03d/%03d | train %.5f | val %.5f | P %.3f R %.3f F1 %.3f "
-            "| share_MAE %.4f | %.2fs",
+            "| share_MAE %.4f hot_share_MAE %.4f | %.2fs",
             epoch,
             args.epochs,
             training_loss,
@@ -315,6 +332,7 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
             validation_metrics["recall"],
             validation_metrics["f1"],
             validation_metrics["get_share_mae"],
+            validation_metrics["hotspot_get_share_mae"],
             epoch_seconds,
         )
         write_event(
@@ -355,6 +373,11 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
                     "training_seed": args.seed,
                     "best_epoch": epoch,
                     "best_validation_loss": best_validation_loss,
+                    "regression_target": (
+                        "conditional severe-hotspot GET share"
+                        if args.conditional_hotspot_regression
+                        else "unconditional GET share"
+                    ),
                 },
                 output_dir / "hotbucket_lstm.pt",
             )
@@ -390,6 +413,7 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
         args.regression_weight,
         args.severe_regression_weight,
         args.underprediction_weight,
+        args.conditional_hotspot_regression,
         device,
     )
     best_validation_metrics = calculate_metrics(
@@ -406,6 +430,7 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
         args.regression_weight,
         args.severe_regression_weight,
         args.underprediction_weight,
+        args.conditional_hotspot_regression,
         device,
     )
     test_loss, labels, probabilities, true_shares, predicted_shares = test_result
@@ -438,6 +463,11 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
         "training_seed": args.seed,
         "best_epoch": best_epoch,
         "best_validation_loss": best_validation_loss,
+        "regression_target": (
+            "conditional severe-hotspot GET share"
+            if args.conditional_hotspot_regression
+            else "unconditional GET share"
+        ),
     }
     torch.save(checkpoint, output_dir / "hotbucket_lstm.pt")
 
@@ -495,7 +525,7 @@ def train(args: argparse.Namespace) -> Dict[str, object]:
     write_event(event_path, "run_completed", result=result)
     logger.info("training complete")
     logger.info(json.dumps(result, indent=2))
-    logger.info("checkpoint=%s", output_dir / "hotbucket_lstm.pt")
+    logger.info("checkpoint=%s", args.output_dir / "hotbucket_lstm.pt")
     return result
 
 
@@ -513,6 +543,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regression-weight", type=float, default=0.25)
     parser.add_argument("--severe-regression-weight", type=float, default=1.0)
     parser.add_argument("--underprediction-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--conditional-hotspot-regression",
+        action="store_true",
+        help=(
+            "train the GET-share head only on severe-hotspot samples so that it "
+            "estimates load conditional on the classifier's hotspot event"
+        ),
+    )
     parser.add_argument("--positive-class-weight-scale", type=float, default=1.0)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--gradient-clip", type=float, default=1.0)

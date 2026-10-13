@@ -29,6 +29,15 @@ const executableCandidates = [
 ].filter(Boolean);
 
 const sshExecutable = process.env.SSH_PATH || "ssh";
+const scpExecutable = process.env.SCP_PATH || "scp";
+const pythonExecutable = process.env.PYTHON_PATH || "python";
+const lstmConfig = {
+  checkpointPath: process.env.LSTM_CHECKPOINT_PATH
+    || path.join(projectRoot, "models", "lstm", "conditional-hotspot", "hotbucket_lstm.pt"),
+  minimumProbability: Number(process.env.LSTM_MIN_PROBABILITY || 0.50),
+  minimumPredictedGetRatio: Number(process.env.LSTM_MIN_PREDICTED_GET_RATIO || 0.0),
+  inferenceCostMs: Number(process.env.LSTM_INFERENCE_COST_MS || 0.9567),
+};
 const rdmaConfig = {
   memoryHost: process.env.RDMA_MEMORY_HOST || "rdma-memory",
   clientHost: process.env.RDMA_CLIENT_HOST || "rdma-client",
@@ -222,7 +231,7 @@ function nodeMemoryBytes(nodes, entities) {
 
 function simulationSettings(url) {
   const params = url.searchParams;
-  const allowedPolicies = new Set(["no-action", "reactive", "recent-window"]);
+  const allowedPolicies = new Set(["no-action", "reactive", "recent-window", "lstm"]);
   const requestedPolicy = params.get("policy") || "recent-window";
   return {
     policy: allowedPolicies.has(requestedPolicy) ? requestedPolicy : "recent-window",
@@ -239,6 +248,71 @@ function simulationSettings(url) {
     readRatio: decimalParam(params, "readRatio", 0.9, 0, 1),
     hotspotShare: decimalParam(params, "hotspotShare", 0.65, 0.01, 1),
   };
+}
+
+async function prepareLstmPredictions(settings, runId, response) {
+  const executable = simulatorPath();
+  if (!executable) {
+    throw new Error("The local simulator is required to prepare LSTM input windows.");
+  }
+  if (!existsSync(lstmConfig.checkpointPath)) {
+    throw new Error(`LSTM checkpoint was not found: ${lstmConfig.checkpointPath}`);
+  }
+  if (settings.windows < 7) {
+    throw new Error("LSTM runs need at least seven windows: six observations and one target.");
+  }
+
+  const traceId = `dashboard-${runId}`;
+  const runDirectory = path.join(projectRoot, "results", "dashboard", "lstm", runId);
+  const rawDirectory = path.join(runDirectory, "raw");
+  const tracePath = path.join(rawDirectory, `${traceId}.csv`);
+  const predictionPath = path.join(runDirectory, "predictions.csv");
+  const relativeTracePath = path.relative(projectRoot, tracePath);
+  const relativePredictionPath = path.relative(projectRoot, predictionPath);
+  mkdirSync(rawDirectory, { recursive: true });
+
+  sendEvent(response, {
+    type: "status",
+    state: "predicting",
+    message: "Building six-window LSTM input and predicting the next window",
+  });
+  await runCommand(executable, [
+    "--trace-only",
+    "--trace-id", traceId,
+    "--workload-pattern", "step",
+    "--nodes", String(settings.nodes),
+    "--buckets", String(settings.buckets),
+    "--entities", String(settings.entities),
+    "--node-memory-bytes", String(nodeMemoryBytes(settings.nodes, settings.entities)),
+    "--windows", String(settings.windows),
+    "--requests", String(settings.requests),
+    "--node-capacity", String(settings.nodeCapacity),
+    "--hotspot-duration", String(settings.hotspotDuration),
+    "--threshold", String(settings.threshold),
+    "--read-ratio", String(settings.readRatio),
+    "--hotspot-share", String(settings.hotspotShare),
+    "--seed", String(settings.seed),
+    "--window-seconds", "30",
+    "--output", relativeTracePath,
+  ], { cwd: projectRoot, timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
+
+  await runCommand(pythonExecutable, [
+    "-m", "ml.predict_raw_traces",
+    "--checkpoint", lstmConfig.checkpointPath,
+    "--raw-dir", rawDirectory,
+    "--output", predictionPath,
+    "--device", "cpu",
+  ], { cwd: projectRoot, timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
+
+  writeLog("INFO", "lstm_predictions_prepared", {
+    runId,
+    traceId,
+    checkpoint: path.relative(projectRoot, lstmConfig.checkpointPath),
+    predictions: path.relative(projectRoot, predictionPath),
+    sequenceLength: 6,
+    minimumProbability: lstmConfig.minimumProbability,
+  });
+  return { traceId, predictionPath, relativePredictionPath };
 }
 
 function getPlacement(response, url) {
@@ -390,6 +464,7 @@ async function startRdmaSimulation(request, response, url) {
   const memoryBytes = nodeMemoryBytes(settings.nodes, settings.entities);
   const services = [];
   let computeChild = null;
+  let remotePredictionPath = null;
   let completed = false;
   let cleaned = false;
 
@@ -401,6 +476,13 @@ async function startRdmaSimulation(request, response, url) {
       if (service.child.exitCode === null) service.child.kill();
     }
     void requestRemoteServiceStop(settings.nodes);
+    if (remotePredictionPath) {
+      void runCommand(
+        sshExecutable,
+        sshArgs(rdmaConfig.clientHost, `rm -f ${remotePredictionPath}`),
+        { timeout: 5000 },
+      ).catch(() => null);
+    }
   };
 
   request.on("close", () => {
@@ -422,6 +504,23 @@ async function startRdmaSimulation(request, response, url) {
       throw new Error(`RDMA environment is not ready. ${failures}`);
     }
 
+    let lstmPrediction = null;
+    if (settings.policy === "lstm") {
+      lstmPrediction = await prepareLstmPredictions(settings, runId, response);
+      remotePredictionPath = `/tmp/hotbucket-dashboard-${runId}-predictions.csv`;
+      sendEvent(response, {
+        type: "rdma-status",
+        state: "uploading-prediction",
+        message: "Sending frozen LSTM predictions to the compute VM",
+      });
+      await runCommand(scpExecutable, [
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        lstmPrediction.predictionPath,
+        `${rdmaConfig.clientHost}:${remotePredictionPath}`,
+      ], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+    }
+
     sendEvent(response, {
       type: "rdma-status",
       state: "starting",
@@ -436,10 +535,12 @@ async function startRdmaSimulation(request, response, url) {
 
     const remoteOutput = `/tmp/hotbucket-dashboard-${runId}.csv`;
     const calibration = health.calibration;
-    const command = [
+    const traceId = lstmPrediction?.traceId || `dashboard-${runId}`;
+    const commandParts = [
       "exec",
       remoteBinary("hotbucket_rdma_sim"),
       "--policy", settings.policy,
+      "--trace-id", traceId,
       "--nodes", String(settings.nodes),
       "--buckets", String(settings.buckets),
       "--entities", String(settings.entities),
@@ -460,7 +561,16 @@ async function startRdmaSimulation(request, response, url) {
       "--rdma-port-base", String(rdmaConfig.basePort),
       "--stream-json",
       "--output", remoteOutput,
-    ].join(" ");
+    ];
+    if (lstmPrediction) {
+      commandParts.push(
+        "--prediction-file", remotePredictionPath,
+        "--lstm-min-probability", String(lstmConfig.minimumProbability),
+        "--lstm-min-predicted-get-ratio", String(lstmConfig.minimumPredictedGetRatio),
+        "--lstm-inference-cost-ms", String(lstmConfig.inferenceCostMs),
+      );
+    }
+    const command = commandParts.join(" ");
 
     computeChild = spawn(
       sshExecutable,
@@ -480,6 +590,13 @@ async function startRdmaSimulation(request, response, url) {
       clientHost: rdmaConfig.clientHost,
       memoryIp: rdmaConfig.memoryIp,
       calibration,
+      lstmPrediction: lstmPrediction
+        ? {
+            traceId,
+            minimumProbability: lstmConfig.minimumProbability,
+            sequenceLength: 6,
+          }
+        : null,
       output: `${rdmaConfig.clientHost}:${remoteOutput}`,
     });
     sendEvent(response, {
@@ -493,6 +610,13 @@ async function startRdmaSimulation(request, response, url) {
       windows: settings.windows,
       output: `${rdmaConfig.clientHost}:${remoteOutput}`,
       calibration,
+      lstmPrediction: lstmPrediction
+        ? {
+            traceId,
+            minimumProbability: lstmConfig.minimumProbability,
+            sequenceLength: 6,
+          }
+        : null,
       logEndpoint: `/api/logs?runId=${encodeURIComponent(runId)}`,
     });
 
@@ -569,7 +693,7 @@ async function startRdmaSimulation(request, response, url) {
   }
 }
 
-function startSimulation(request, response, url) {
+async function startSimulation(request, response, url) {
   if (url.searchParams.get("mode") === "rdma") {
     void startRdmaSimulation(request, response, url);
     return;
@@ -618,9 +742,23 @@ function startSimulation(request, response, url) {
     `${policy}-${Date.now()}-seed-${seed}.csv`,
   );
   const relativeOutputPath = path.relative(projectRoot, outputPath);
+  let lstmPrediction = null;
+  if (policy === "lstm") {
+    try {
+      lstmPrediction = await prepareLstmPredictions(
+        simulationSettings(url), runId, response,
+      );
+    } catch (error) {
+      writeLog("ERROR", "lstm_prediction_failed", { runId, message: error.message });
+      sendEvent(response, { type: "error", runId, message: error.message });
+      response.end();
+      return;
+    }
+  }
 
   const args = [
     "--policy", policy,
+    "--trace-id", lstmPrediction?.traceId || `dashboard-${runId}`,
     "--nodes", String(nodes),
     "--buckets", String(buckets),
     "--entities", String(entities),
@@ -637,6 +775,14 @@ function startSimulation(request, response, url) {
     "--stream-json",
     "--output", relativeOutputPath,
   ];
+  if (lstmPrediction) {
+    args.push(
+      "--prediction-file", lstmPrediction.relativePredictionPath,
+      "--lstm-min-probability", String(lstmConfig.minimumProbability),
+      "--lstm-min-predicted-get-ratio", String(lstmConfig.minimumPredictedGetRatio),
+      "--lstm-inference-cost-ms", String(lstmConfig.inferenceCostMs),
+    );
+  }
 
   const child = spawn(executable, args, {
     cwd: projectRoot,
@@ -658,6 +804,13 @@ function startSimulation(request, response, url) {
     requestsPerWindow: requests,
     threshold,
     seed,
+    lstmPrediction: lstmPrediction
+      ? {
+          traceId: lstmPrediction.traceId,
+          minimumProbability: lstmConfig.minimumProbability,
+          sequenceLength: 6,
+        }
+      : null,
     output: relativeOutputPath,
   });
 
@@ -670,6 +823,13 @@ function startSimulation(request, response, url) {
     buckets,
     entities,
     windows,
+    lstmPrediction: lstmPrediction
+      ? {
+          traceId: lstmPrediction.traceId,
+          minimumProbability: lstmConfig.minimumProbability,
+          sequenceLength: 6,
+        }
+      : null,
     output: relativeOutputPath,
     logEndpoint: `/api/logs?runId=${encodeURIComponent(runId)}`,
   });
@@ -833,7 +993,7 @@ const server = createServer((request, response) => {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/simulate") {
-    startSimulation(request, response, url);
+    void startSimulation(request, response, url);
     return;
   }
   serveStatic(response, url.pathname);

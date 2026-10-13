@@ -33,6 +33,28 @@ def relative_to_root(path: Path, root: Path) -> Path:
         return path.resolve()
 
 
+def apply_rdma_calibration(args: argparse.Namespace) -> None:
+    if args.rdma_calibration is None:
+        return
+    calibration_path = args.rdma_calibration.resolve()
+    report = json.loads(calibration_path.read_text(encoding="utf-8"))
+    model_name = "{}_end_to_end".format(args.calibration_percentile)
+    try:
+        model = report["cost_models"][model_name]
+        bandwidth = float(model["copy_bandwidth_mib_per_ms"])
+        fixed_cost = float(model["fixed_cost_ms"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "calibration file has no usable {} cost model: {}".format(
+                model_name, calibration_path
+            )
+        ) from error
+    if bandwidth <= 0 or fixed_cost < 0:
+        raise ValueError("calibrated bandwidth must be positive and fixed cost non-negative")
+    args.copy_bandwidth_mib_per_ms = bandwidth
+    args.metadata_cost_ms = fixed_cost
+
+
 def run_policy(
     root: Path,
     executable: Path,
@@ -46,6 +68,8 @@ def run_policy(
     predicted_get_ratio: float,
     inference_cost_ms: float,
     bucket_size_mib: float,
+    copy_bandwidth_mib_per_ms: float,
+    metadata_cost_ms: float,
 ) -> Dict[str, float]:
     source_windows = int(trace["windows"])
     windows = int(source_windows * evaluation_end_fraction)
@@ -71,8 +95,8 @@ def run_policy(
         "--evaluation-start-window", str(evaluation_start),
         "--replica-ttl", "3",
         "--bucket-size-mib", str(bucket_size_mib),
-        "--copy-bandwidth-mib-per-ms", "1.5",
-        "--metadata-cost-ms", "0.08",
+        "--copy-bandwidth-mib-per-ms", str(copy_bandwidth_mib_per_ms),
+        "--metadata-cost-ms", str(metadata_cost_ms),
         "--output", str(relative_to_root(output, root)),
     ]
     if policy == "lstm":
@@ -107,6 +131,7 @@ def run_policy(
 
 def tune(args: argparse.Namespace) -> Dict[str, object]:
     root = Path(__file__).resolve().parents[1]
+    apply_rdma_calibration(args)
     traces = load_manifest(args.manifest.resolve())
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +154,8 @@ def tune(args: argparse.Namespace) -> Dict[str, object]:
                 0.0,
                 0.0,
                 args.bucket_size_mib,
+                args.copy_bandwidth_mib_per_ms,
+                args.metadata_cost_ms,
             )
 
     trials: List[Dict[str, object]] = []
@@ -156,6 +183,8 @@ def tune(args: argparse.Namespace) -> Dict[str, object]:
                     predicted_get_ratio,
                     args.inference_cost_ms,
                     args.bucket_size_mib,
+                    args.copy_bandwidth_mib_per_ms,
+                    args.metadata_cost_ms,
                 )
                 no_action = baselines[trace_id]["no-action"]["completion_ms"]
                 recent = baselines[trace_id]["recent-window"]["completion_ms"]
@@ -193,6 +222,20 @@ def tune(args: argparse.Namespace) -> Dict[str, object]:
         "selection_data": "validation windows only",
         "evaluation_start_fraction": args.evaluation_start_fraction,
         "evaluation_end_fraction": args.evaluation_end_fraction,
+        "copy_cost_model": {
+            "fixed_cost_ms": args.metadata_cost_ms,
+            "copy_bandwidth_mib_per_ms": args.copy_bandwidth_mib_per_ms,
+            "source": (
+                str(relative_to_root(args.rdma_calibration, root))
+                if args.rdma_calibration is not None
+                else "command-line values"
+            ),
+            "percentile": (
+                args.calibration_percentile
+                if args.rdma_calibration is not None
+                else None
+            ),
+        },
         "best": trials[0],
         "trials": trials,
     }
@@ -229,6 +272,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluation-end-fraction", type=float, default=0.85)
     parser.add_argument("--inference-cost-ms", type=float, default=0.9567)
     parser.add_argument("--bucket-size-mib", type=float, default=4.0)
+    parser.add_argument("--copy-bandwidth-mib-per-ms", type=float, default=1.5)
+    parser.add_argument("--metadata-cost-ms", type=float, default=0.08)
+    parser.add_argument("--rdma-calibration", type=Path)
+    parser.add_argument(
+        "--calibration-percentile", choices=("p50", "p95"), default="p50"
+    )
     return parser.parse_args()
 
 

@@ -10,6 +10,9 @@ results/**/*.jsonl
 !results/calibrated-final-confirmation/summary.csv
 !results/calibrated-final-confirmation/aggregate.csv
 !results/calibrated-final-confirmation/pairwise.csv
+!results/conditional-confirmation-calibrated/summary.csv
+!results/conditional-confirmation-calibrated/aggregate.csv
+!results/conditional-confirmation-calibrated/pairwise.csv
 results/rdma-calibration-smoke*/
 .idea/
 .vscode/
@@ -21,6 +24,14 @@ __pycache__/
 data/traces/
 data/training/
 data/predictions/
-models/
+models/*
+!models/lstm/
+models/lstm/*
+!models/lstm/conditional-hotspot/
+models/lstm/conditional-hotspot/*
+!models/lstm/conditional-hotspot/hotbucket_lstm.pt
+!models/lstm/conditional-hotspot/metrics.json
+!models/lstm/conditional-hotspot/training_history.csv
+!models/lstm/conditional-hotspot/training.log
 dashboard/node_modules/
 dashboard/dist/

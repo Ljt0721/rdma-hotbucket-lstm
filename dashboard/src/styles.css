@@ -88,7 +88,7 @@ button { letter-spacing: 0; }
 .control-group { margin-bottom: 20px; }
 .group-label { display: block; margin-bottom: 8px; color: #4d5f73; font-size: 11px; font-weight: 700; text-transform: uppercase; }
 
-.segment-control { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #c8d1dc; border-radius: 4px; overflow: hidden; }
+.segment-control { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid #c8d1dc; border-radius: 4px; overflow: hidden; }
 .segment-control.mode-control { grid-template-columns: repeat(2, 1fr); }
 .segment-control button {
   min-height: 38px;

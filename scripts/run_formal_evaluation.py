@@ -214,7 +214,9 @@ def run_evaluation(args: argparse.Namespace) -> None:
         copy_bandwidth_mib_per_ms=args.copy_bandwidth_mib_per_ms,
         metadata_cost_ms=args.metadata_cost_ms,
         rdma_calibration=(
-            str(args.rdma_calibration.resolve()) if args.rdma_calibration else None
+            str(relative_to_root(args.rdma_calibration, root))
+            if args.rdma_calibration
+            else None
         ),
         calibration_percentile=(
             args.calibration_percentile if args.rdma_calibration else None
@@ -329,7 +331,7 @@ def run_evaluation(args: argparse.Namespace) -> None:
                     "max_node_load_ratio": float(summary["max_node_load_ratio"]),
                     "copies": int(summary["copies"]),
                     "wall_seconds": elapsed,
-                    "result_csv": str(result_path),
+                    "result_csv": str(relative_to_root(result_path, root)),
                 }
             )
 

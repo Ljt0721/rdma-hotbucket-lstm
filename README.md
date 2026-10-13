@@ -22,6 +22,7 @@ window-level demand without allowing a balancing policy to alter the training tr
 - Policy-independent traces with stable, step, ramp, gradual, burst, and random hotspots
 - Chronological train/validation/test construction using six windows to predict the next window
 - A small shared LSTM with early stopping, checkpoints, metrics, and test prediction export
+- A conditional hotspot-load head consistent with probability-weighted copy benefit
 - Frozen prediction replay with copy cost, measured inference overhead, and paired comparisons
 - Versioned bucket bundles containing real entity bytes, allocation boundaries, TTL, and checksum
 - RDMA replica services that validate and commit bucket bundles before returning an ACK
@@ -104,6 +105,16 @@ python -m ml.build_dataset
 python -m ml.train
 ```
 
+The current cost-aware model trains the GET-share head only on severe-hotspot samples. This makes
+its two outputs compatible: the classifier estimates hotspot probability, while the regression
+head estimates request volume if that hotspot occurs.
+
+```powershell
+python -m ml.train --dataset-dir data/training/formal `
+  --output-dir models/lstm/conditional-hotspot `
+  --epochs 60 --batch-size 256 --conditional-hotspot-regression
+```
+
 For a short pipeline check, use two traces per pattern, 120 windows, and 3 training epochs:
 
 ```powershell
@@ -133,7 +144,9 @@ validation traces for each probability and predicted-GET gate pair:
 ```powershell
 python -m ml.export_predictions --split validation `
   --output data/predictions/formal-validation.csv
-python scripts/tune_policy_validation.py
+python scripts/tune_policy_validation.py `
+  --prediction-file data/predictions/conditional-hotspot-validation.csv `
+  --rdma-calibration results/rdma-calibration/summary.json
 ```
 
 The first controlled result is recorded in
@@ -141,6 +154,8 @@ The first controlled result is recorded in
 the lightweight predictor; that remains an experimental question rather than a promised outcome.
 The validation-only gate correction and fresh-seed confirmation are recorded in
 [`docs/prediction-improvement.md`](docs/prediction-improvement.md).
+The calibrated conditional-regression experiment is recorded in
+[`docs/conditional-hotspot-regression.md`](docs/conditional-hotspot-regression.md).
 
 ## Live dashboard
 
@@ -154,6 +169,12 @@ SSH to control the two Ubuntu VMs, starts one persistent Soft-RoCE replica servi
 memory node, and runs the compute-side simulator on the client VM. In this mode the displayed copy
 sequence, RDMA WRITE time, and end-to-end acknowledgement time come from real `libibverbs`
 operations. A failed VM check stops the run; it does not silently fall back to simulation.
+
+The dashboard also exposes **Cost-aware LSTM**. Before a run, it creates a policy-independent trace
+with the selected seed and applies the frozen model to six-window histories. Each prediction uses
+only windows earlier than its target. Local mode replays those predictions in the Windows
+simulator; Real RDMA mode sends the prediction file to the compute VM and performs every accepted
+copy with `IBV_WR_RDMA_WRITE`. This is reproducible offline inference, not online retraining.
 
 On Windows, the complete start command is:
 

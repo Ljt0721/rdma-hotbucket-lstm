@@ -33,6 +33,21 @@ class ModelTests(unittest.TestCase):
 
         self.assertGreater(float(under_loss), float(over_loss))
 
+    def test_conditional_regression_ignores_non_hotspot_samples(self) -> None:
+        true_share = torch.tensor([0.5, 0.1])
+        severe = torch.tensor([1.0, 0.0])
+        first_prediction = torch.tensor([0.4, 0.0])
+        second_prediction = torch.tensor([0.4, 1.0])
+
+        first_loss = hotspot_aware_regression_loss(
+            first_prediction, true_share, severe, 1.0, 1.0, True
+        )
+        second_loss = hotspot_aware_regression_loss(
+            second_prediction, true_share, severe, 1.0, 1.0, True
+        )
+
+        self.assertAlmostEqual(float(first_loss), float(second_loss), places=7)
+
 
 if __name__ == "__main__":
     unittest.main()

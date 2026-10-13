@@ -52,3 +52,34 @@ console.log(JSON.stringify({
   peakReplicas: Math.max(...memory.map((event) => event.replicaCount)),
   expirationEvents: memory.filter((event) => event.expiredReplicas.length > 0).length,
 }, null, 2));
+
+const lstmParams = new URLSearchParams(params);
+lstmParams.set("policy", "lstm");
+const lstmResponse = await fetch(`${baseUrl}/api/simulate?${lstmParams}`);
+assert.equal(lstmResponse.ok, true, `LSTM endpoint returned ${lstmResponse.status}`);
+
+const lstmEvents = (await lstmResponse.text())
+  .split(/\r?\n\r?\n/)
+  .filter((block) => block.startsWith("data: "))
+  .map((block) => JSON.parse(block.slice(6)));
+const predictionStatus = lstmEvents.find(
+  (event) => event.type === "status" && event.state === "predicting",
+);
+const lstmStarted = lstmEvents.find((event) => event.type === "started");
+const lstmWindows = lstmEvents.filter((event) => event.type === "window");
+const lstmComplete = lstmEvents.find((event) => event.type === "complete");
+const lstmError = lstmEvents.find((event) => event.type === "error");
+
+assert.equal(lstmError, undefined, lstmError?.message || "LSTM run should not fail");
+assert.ok(predictionStatus, "LSTM run should report prediction preparation");
+assert.equal(lstmStarted?.policy, "lstm", "LSTM policy should start");
+assert.equal(lstmStarted?.lstmPrediction?.sequenceLength, 6, "LSTM should use six windows");
+assert.equal(lstmWindows.length, 12, "LSTM run should emit 12 window events");
+assert.ok(lstmComplete?.copies > 0, "LSTM run should complete with a physical copy");
+
+console.log(JSON.stringify({
+  policy: lstmStarted.policy,
+  sequenceLength: lstmStarted.lstmPrediction.sequenceLength,
+  windows: lstmWindows.length,
+  copies: lstmComplete.copies,
+}, null, 2));
