@@ -29,6 +29,8 @@ struct CommandLine {
     std::size_t severe_get_threshold{1200};
     std::size_t window_delay_ms{0};
     std::size_t node_memory_bytes{2048};
+    std::size_t placement_detail_limit{1000};
+    std::size_t placement_block_entities{10000};
     std::size_t observation_window_seconds{30};
     std::size_t evaluation_start_window{0};
     std::string trace_id{"trace-0"};
@@ -105,6 +107,12 @@ CommandLine ParseArguments(int argc, char** argv) {
             command.window_delay_ms = std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--node-memory-bytes") {
             command.node_memory_bytes = std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--placement-detail-limit") {
+            command.placement_detail_limit =
+                std::stoull(RequireValue(index, argc, argv));
+        } else if (argument == "--placement-block-entities") {
+            command.placement_block_entities =
+                std::stoull(RequireValue(index, argc, argv));
         } else if (argument == "--window-seconds") {
             command.observation_window_seconds =
                 std::stoull(RequireValue(index, argc, argv));
@@ -145,6 +153,7 @@ CommandLine ParseArguments(int argc, char** argv) {
                 << "  --policy no-action|reactive|recent-window|lstm\n"
                 << "  --nodes N --buckets N --entities N --windows N --requests N\n"
                 << "  --node-capacity N --node-memory-bytes N\n"
+                << "  --placement-detail-limit N --placement-block-entities N\n"
                 << "  --entity-store path/to/entities.hbkv\n"
                 << "  --initialize-entity-store path/to/entities.hbkv\n"
                 << "  --hotspot-duration N --replica-ttl N --threshold N --seed N\n"
@@ -352,12 +361,11 @@ void StreamPlacementJson(
               << placement.alignment_bytes
               << ",\"bucketCount\":" << placement.bucket_count
               << ",\"nodeCount\":" << placement.nodes.size()
+              << ",\"detailed\":" << (placement.detailed ? "true" : "false")
               << ",\"totalCapacityBytes\":" << placement.total_capacity_bytes
               << ",\"totalUsedBytes\":" << placement.total_used_bytes
               << ",\"nodes\":[";
 
-    std::size_t primary_count = 0;
-    std::size_t replica_count = 0;
     for (std::size_t node_index = 0; node_index < placement.nodes.size(); ++node_index) {
         if (node_index > 0) {
             std::cout << ',';
@@ -366,17 +374,34 @@ void StreamPlacementJson(
         std::cout << "{\"id\":" << node.node_id
                   << ",\"capacityBytes\":" << node.capacity_bytes
                   << ",\"usedBytes\":" << node.used_bytes
-                  << ",\"entities\":[";
+                  << ",\"primaryCount\":" << node.primary_count
+                  << ",\"replicaCount\":" << node.replica_count
+                  << ",\"blocks\":[";
+        for (std::size_t block_index = 0; block_index < node.blocks.size(); ++block_index) {
+            if (block_index > 0) {
+                std::cout << ',';
+            }
+            const auto& block = node.blocks[block_index];
+            std::cout << "{\"offsetBytes\":" << block.offset_bytes
+                      << ",\"spanBytes\":" << block.span_bytes
+                      << ",\"usedBytes\":" << block.used_bytes
+                      << ",\"entityCount\":" << block.entity_count
+                      << ",\"isReplica\":" << (block.is_replica ? "true" : "false")
+                      << ",\"bucketId\":";
+            if (block.mixed_buckets) {
+                std::cout << "null";
+            } else {
+                std::cout << block.bucket_id;
+            }
+            std::cout << ",\"firstEntityId\":" << block.first_entity_id
+                      << ",\"lastEntityId\":" << block.last_entity_id << '}';
+        }
+        std::cout << "],\"entities\":[";
         for (std::size_t entity_index = 0; entity_index < node.entities.size(); ++entity_index) {
             if (entity_index > 0) {
                 std::cout << ',';
             }
             const auto& allocation = node.entities[entity_index];
-            if (allocation.is_replica) {
-                ++replica_count;
-            } else {
-                ++primary_count;
-            }
             std::cout << "{\"id\":" << allocation.entity.entity_id
                       << ",\"callsign\":\"" << JsonEscape(allocation.entity.callsign)
                       << "\",\"entityType\":\"" << JsonEscape(allocation.entity.entity_type)
@@ -410,9 +435,9 @@ void StreamPlacementJson(
         }
         std::cout << "]}";
     }
-    std::cout << "],\"entityCount\":" << primary_count
-              << ",\"primaryCount\":" << primary_count
-              << ",\"replicaCount\":" << replica_count << "}" << std::endl;
+    std::cout << "],\"entityCount\":" << placement.entity_count
+              << ",\"primaryCount\":" << placement.entity_count
+              << ",\"replicaCount\":" << placement.replica_count << "}" << std::endl;
 }
 
 void StreamWindowJson(const std::string& policy,
@@ -521,7 +546,10 @@ int main(int argc, char** argv) {
             command.config.node_count,
             command.config.bucket_count,
             command.node_memory_bytes);
-        const auto placement = memory_cluster.Allocate(entities);
+        const auto placement = memory_cluster.Allocate(
+            entities,
+            command.placement_detail_limit,
+            command.placement_block_entities);
         if (command.stream_json) {
             StreamPlacementJson(placement);
         }
@@ -703,7 +731,9 @@ int main(int argc, char** argv) {
                     StreamWindowJson(
                         policy->Name(), command.config, result, total_completion_ms, copies);
                     StreamPlacementJson(
-                        memory_cluster.Snapshot(),
+                        memory_cluster.Snapshot(
+                            command.placement_detail_limit,
+                            command.placement_block_entities),
                         "memory",
                         window,
                         copy_applied ? decision : std::nullopt,

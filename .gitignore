@@ -24,6 +24,7 @@ __pycache__/
 data/traces/
 data/training/
 data/predictions/
+data/entity-store/entities-*.hbkv
 models/*
 !models/lstm/
 models/lstm/*

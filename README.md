@@ -13,7 +13,7 @@ window-level demand without allowing a balancing policy to alter the training tr
 - Hash-bucket entity-state workload (`EntityID -> EntityAttribute` access pattern)
 - Moving, read-heavy hotspots
 - Multiple simulated memory nodes
-- Ten battlefield entities serialized into five independent byte-addressed node pools
+- Ten default battlefield entities for detailed debugging and an optional 100,000-entity scale store
 - A durable HBKV file containing complete `EntityID -> entity attributes` records
 - REST endpoints to create, read, update, and delete entities by `EntityID`
 - Browser view of each entity's node, hash bucket, memory offset, allocation size, and attributes
@@ -163,7 +163,7 @@ The calibrated conditional-regression experiment is recorded in
 
 The dashboard streams each completed window through a local Server-Sent Events endpoint. It
 displays logical node load, hot-bucket movement, GET/PUT activity, copy decisions, and the
-`EntityID -> bucket -> node -> memory offset` placement for ten battlefield entities. Temporary
+`EntityID -> bucket -> node -> memory offset` placement for the active entity store. Temporary
 copies occupy new byte ranges, show their expiry window, and disappear when their TTL ends.
 
 The default entity records are stored in `data/entity-store/entities.hbkv`. The file is the durable
@@ -243,6 +243,39 @@ npm run dev
 
 The React development server uses port `5173`; the local simulation API uses port `8787`. Every run
 also writes its full CSV data under `results/dashboard/`.
+
+### 100,000-entity scale mode
+
+The normal start command keeps the small ten-entity store because it is convenient for inspecting
+individual offsets and attributes. The scale command selects a separate local HBKV file and creates
+100,000 records on first use:
+
+```powershell
+cd "C:\Users\csqlj\Desktop\毕设\rdma-hotbucket-lstm"
+powershell -ExecutionPolicy Bypass -File scripts/start_100k_dashboard.ps1
+```
+
+The generated `data/entity-store/entities-100k.hbkv` file is intentionally ignored by Git. On the
+current data templates it is about 52.6 MB. Placements above 1,000 allocations do not send every
+entity to React. Each node instead returns bounded memory blocks containing at most 10,000 entities;
+the rectangle width follows the block's byte span. A specific entity can still be inspected by its
+key through the Entity KV store panel.
+
+The LSTM does not receive 100,000 entity records. It receives recent request statistics for each
+hash bucket and predicts the next-window bucket load. Entity count still matters to the experiment
+because it changes bucket size, replica-copy bytes, memory use, and therefore the cost-benefit
+decision.
+
+`Vector3`, `VectorList`, `Record`, and similar names are currently schema labels stored in
+`EntityAttribute.value_type`; the corresponding values are UTF-8 strings in the HBKV v1 prototype.
+They are not C++ `std::vector` types. This representation keeps heterogeneous battlefield records
+easy to inspect. A later binary schema can replace the strings with typed values when serialization
+size and per-field update performance become evaluation targets.
+
+The persistent CRUD API is functional at 100,000 records, but HBKV v1 rewrites the snapshot for a
+create, update, or delete. It is an experiment-control persistence layer, not the high-frequency
+request path. Simulated GET/PUT requests and RDMA replicas operate on memory. An indexed or
+log-structured persistent backend remains future implementation work.
 
 ### Real RDMA cold start on the current lab machine
 

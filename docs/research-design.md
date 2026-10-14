@@ -29,18 +29,19 @@ The current queue and copy formulas are parameterized simulation models. They es
 experiment pipeline; they are not evidence of real RDMA performance. Physical claims require
 calibration against RDMA CM/verbs microbenchmarks on Linux with RDMA hardware or Soft-RoCE.
 
-The current entity-placement demonstration uses ten battlefield objects and five logical memory
-nodes. Every entity contains variable-size state attributes. The C++ backend serializes each record,
-hashes `EntityID` to a bucket, maps the bucket to a home node, and stores the bytes in that node's
-contiguous memory vector with 64-byte alignment. The dashboard renders the resulting node, offset,
-serialized size, aligned allocation, and attributes. Workload generation uses the same ten entity
-IDs, so a displayed hot bucket refers to data that was actually placed in the simulated pool.
+The default entity-placement demonstration uses ten battlefield objects for detailed inspection.
+The scale profile uses 100,000 records. Every entity contains variable-size state attributes. The
+C++ backend serializes each record, hashes `EntityID` to a bucket, maps the bucket to a home node,
+and stores the bytes in that node's contiguous memory vector with 64-byte alignment. Small snapshots
+show individual offsets and attributes. Large snapshots aggregate no more than 10,000 records into
+one visual memory block, while a key query still returns one complete entity. Workload generation
+uses IDs from the active durable store, so a hot bucket refers to records actually placed in memory.
 
 When a policy approves replication, the backend copies every primary entity byte range in that
 bucket into a free aligned range on the selected node. The routing simulator and byte-addressed
 memory pool use the same target and expiry window. GET requests can then be split between the home
 node and replica. PUT requests count one update at each active location. At TTL expiry, routing
 metadata is removed, the copied bytes are zeroed, and the freed range can be reused. Copy time is
-estimated from the configured logical bucket payload or the actual aligned demo bytes, whichever is
-larger, plus the configured metadata cost. The visible entity record is only a representative part
-of a logical bucket and must not make a multi-megabyte copy appear free.
+estimated from the configured logical bucket payload or the actual aligned bucket bytes, whichever
+is larger, plus the configured metadata cost. At 100,000 records, a bucket contains many entities,
+and the RDMA bundle includes their complete aligned byte ranges rather than a visual placeholder.

@@ -311,6 +311,31 @@ input[type="range"] { width: 100%; accent-color: #245a78; }
   opacity: 0.82;
 }
 .memory-segment.just-copied { animation: copy-arrival 700ms ease-out; }
+.memory-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: #ffffff;
+  background: #337b99;
+  border-right: 2px solid #ffffff;
+  font-size: 8px;
+  font-weight: 700;
+}
+.memory-block:nth-child(even) { background: #2d8a69; }
+.memory-block.replica {
+  top: 4px;
+  bottom: 4px;
+  background: #b2721b;
+  border: 2px dashed #ffffff;
+  opacity: 0.86;
+}
+.memory-block.hot { box-shadow: inset 0 0 0 2px #c83232; }
+.memory-block.just-copied { animation: copy-arrival 700ms ease-out; }
 @keyframes copy-arrival {
   0% { opacity: 0.2; transform: scaleY(0.35); }
   55% { opacity: 1; transform: scaleY(1.12); }
@@ -324,6 +349,43 @@ input[type="range"] { width: 100%; accent-color: #245a78; }
 .type-5 { color: #ffffff; background: #546b82; }
 
 .node-entity-list { border-top: 1px solid #e2e7ec; }
+.aggregate-block-row {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #edf0f3;
+}
+.aggregate-block-row:last-child { border-bottom: 0; }
+.aggregate-block-row > span:nth-child(2) { min-width: 0; }
+.aggregate-block-row strong,
+.aggregate-block-row small { display: block; }
+.aggregate-block-row strong { color: #21384f; font-size: 10px; }
+.aggregate-block-row small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: #768494;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aggregate-block-row b { color: #40566c; font-size: 9px; font-weight: 600; }
+.aggregate-block-mark { width: 8px; height: 28px; background: #337b99; border-radius: 2px; }
+.aggregate-block-row:nth-child(even) .aggregate-block-mark { background: #2d8a69; }
+.aggregate-block-row.replica .aggregate-block-mark { background: #b2721b; }
+.aggregate-placement-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  color: #526579;
+  background: #f8fafb;
+  border-top: 1px solid #e2e7ec;
+  font-size: 10px;
+}
+.aggregate-placement-note strong { color: #1f354b; white-space: nowrap; }
 .node-entity-list button {
   width: 100%;
   min-height: 48px;

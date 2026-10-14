@@ -96,7 +96,9 @@ console.log(JSON.stringify({
   copies: lstmComplete.copies,
 }, null, 2));
 
-const temporaryEntityId = 900000000 + process.pid;
+// Keep the temporary key below the generated 1001+ range so it remains inside
+// a capped 100,000-record placement when the scale-test store is active.
+const temporaryEntityId = 900 + (process.pid % 100);
 const originalStore = await requestJson("/api/kv/entities");
 assert.equal(originalStore.durable, true, "entity store should be durable");
 assert.ok(originalStore.count >= 2, "entity store should contain simulation records");
@@ -139,8 +141,9 @@ try {
   });
   assert.equal(updated.entity.attributeMap.health.value, "0.73", "PUT should persist changes");
 
+  const detailedPlacementCount = Math.min(originalStore.count + 1, 999);
   const placementAfterCreate = await requestJson(
-    `/api/placement?nodes=5&buckets=64&entities=${originalStore.count + 1}`,
+    `/api/placement?nodes=5&buckets=64&entities=${detailedPlacementCount}`,
   );
   const allocatedIds = placementAfterCreate.nodes
     .flatMap((node) => node.entities)

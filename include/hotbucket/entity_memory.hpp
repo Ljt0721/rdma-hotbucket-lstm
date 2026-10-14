@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -34,16 +35,34 @@ struct EntityAllocation {
     std::size_t expires_after_window{};
 };
 
+struct MemoryBlockSummary {
+    std::size_t offset_bytes{};
+    std::size_t span_bytes{};
+    std::size_t used_bytes{};
+    std::size_t entity_count{};
+    bool is_replica{false};
+    bool mixed_buckets{false};
+    std::size_t bucket_id{};
+    std::uint64_t first_entity_id{};
+    std::uint64_t last_entity_id{};
+};
+
 struct MemoryNodeSnapshot {
     std::size_t node_id{};
     std::size_t capacity_bytes{};
     std::size_t used_bytes{};
+    std::size_t primary_count{};
+    std::size_t replica_count{};
+    std::vector<MemoryBlockSummary> blocks;
     std::vector<EntityAllocation> entities;
 };
 
 struct MemoryPlacementSnapshot {
+    bool detailed{true};
     std::size_t alignment_bytes{};
     std::size_t bucket_count{};
+    std::size_t entity_count{};
+    std::size_t replica_count{};
     std::size_t total_capacity_bytes{};
     std::size_t total_used_bytes{};
     std::vector<MemoryNodeSnapshot> nodes;
@@ -56,8 +75,13 @@ public:
                         std::size_t node_capacity_bytes = 2048,
                         std::size_t alignment_bytes = 64);
 
-    MemoryPlacementSnapshot Allocate(const std::vector<BattlefieldEntity>& entities);
-    MemoryPlacementSnapshot Snapshot() const;
+    MemoryPlacementSnapshot Allocate(
+        const std::vector<BattlefieldEntity>& entities,
+        std::size_t detail_limit = std::numeric_limits<std::size_t>::max(),
+        std::size_t block_entity_limit = 10000);
+    MemoryPlacementSnapshot Snapshot(
+        std::size_t detail_limit = std::numeric_limits<std::size_t>::max(),
+        std::size_t block_entity_limit = 10000) const;
     bool CanReplicateBucket(std::size_t bucket_id, std::size_t target_node) const;
     bool ReplicateBucket(std::size_t bucket_id,
                          std::size_t target_node,
@@ -76,6 +100,7 @@ private:
     struct MemoryNode {
         std::vector<std::uint8_t> memory;
         std::vector<EntityAllocation> allocations;
+        std::size_t used_bytes{};
     };
 
     std::size_t FindTargetNode(std::size_t preferred_node,

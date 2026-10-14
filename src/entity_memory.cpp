@@ -407,28 +407,44 @@ std::size_t EntityMemoryCluster::FindFreeOffset(const MemoryNode& node,
 }
 
 std::size_t EntityMemoryCluster::UsedBytes(const MemoryNode& node) const {
-    std::size_t used = 0;
-    for (const auto& allocation : node.allocations) {
-        used += allocation.allocated_bytes;
-    }
-    return used;
+    return node.used_bytes;
 }
 
 MemoryPlacementSnapshot EntityMemoryCluster::Allocate(
-    const std::vector<BattlefieldEntity>& entities) {
+    const std::vector<BattlefieldEntity>& entities,
+    std::size_t detail_limit,
+    std::size_t block_entity_limit) {
     for (auto& node : nodes_) {
         std::fill(node.memory.begin(), node.memory.end(), 0);
         node.allocations.clear();
+        node.used_bytes = 0;
     }
 
+    std::vector<std::size_t> next_offsets(nodes_.size(), 0);
     for (const auto& entity : entities) {
         const auto payload = SerializeEntity(entity);
         const auto allocated_bytes = AlignUp(payload.size(), alignment_bytes_);
         const auto bucket_id = static_cast<std::size_t>(entity.entity_id % bucket_count_);
         const auto preferred_node = bucket_id % nodes_.size();
-        const auto node_id = FindTargetNode(preferred_node, allocated_bytes);
+        auto node_id = preferred_node;
+        auto offset = AlignUp(next_offsets[node_id], alignment_bytes_);
+        if (offset + allocated_bytes > nodes_[node_id].memory.size()) {
+            node_id = nodes_.size();
+            std::size_t least_used = std::numeric_limits<std::size_t>::max();
+            for (std::size_t candidate = 0; candidate < nodes_.size(); ++candidate) {
+                const auto candidate_offset = AlignUp(next_offsets[candidate], alignment_bytes_);
+                if (candidate_offset + allocated_bytes <= nodes_[candidate].memory.size() &&
+                    next_offsets[candidate] < least_used) {
+                    node_id = candidate;
+                    least_used = next_offsets[candidate];
+                }
+            }
+            if (node_id == nodes_.size()) {
+                throw std::bad_alloc();
+            }
+            offset = AlignUp(next_offsets[node_id], alignment_bytes_);
+        }
         auto& node = nodes_[node_id];
-        const auto offset = FindFreeOffset(node, allocated_bytes);
 
         std::copy(payload.begin(), payload.end(), node.memory.begin() + offset);
         node.allocations.push_back(EntityAllocation{
@@ -442,26 +458,87 @@ MemoryPlacementSnapshot EntityMemoryCluster::Allocate(
             false,
             0,
         });
+        node.used_bytes += allocated_bytes;
+        next_offsets[node_id] = offset + allocated_bytes;
     }
 
-    return Snapshot();
+    return Snapshot(detail_limit, block_entity_limit);
 }
 
-MemoryPlacementSnapshot EntityMemoryCluster::Snapshot() const {
+MemoryPlacementSnapshot EntityMemoryCluster::Snapshot(
+    std::size_t detail_limit,
+    std::size_t block_entity_limit) const {
+    if (block_entity_limit == 0) {
+        throw std::invalid_argument("block_entity_limit must be positive");
+    }
     MemoryPlacementSnapshot snapshot;
     snapshot.alignment_bytes = alignment_bytes_;
     snapshot.bucket_count = bucket_count_;
+    std::size_t allocation_count = 0;
+    for (const auto& node : nodes_) {
+        allocation_count += node.allocations.size();
+    }
+    snapshot.detailed = allocation_count <= detail_limit;
+
     for (std::size_t node_id = 0; node_id < nodes_.size(); ++node_id) {
         const auto& node = nodes_[node_id];
         const auto used_bytes = UsedBytes(node);
+        MemoryNodeSnapshot node_snapshot;
+        node_snapshot.node_id = node_id;
+        node_snapshot.capacity_bytes = node.memory.size();
+        node_snapshot.used_bytes = used_bytes;
+
+        MemoryBlockSummary current_block;
+        bool has_block = false;
+        const auto flush_block = [&]() {
+            if (!has_block) {
+                return;
+            }
+            node_snapshot.blocks.push_back(current_block);
+            current_block = MemoryBlockSummary{};
+            has_block = false;
+        };
+        for (const auto& allocation : node.allocations) {
+            if (allocation.is_replica) {
+                ++node_snapshot.replica_count;
+                ++snapshot.replica_count;
+            } else {
+                ++node_snapshot.primary_count;
+                ++snapshot.entity_count;
+            }
+
+            const auto allocation_end = allocation.offset_bytes + allocation.allocated_bytes;
+            const auto block_end = current_block.offset_bytes + current_block.span_bytes;
+            const bool same_kind = has_block &&
+                                   current_block.is_replica == allocation.is_replica;
+            const bool contiguous = has_block && block_end == allocation.offset_bytes;
+            const bool same_replica_bucket = !allocation.is_replica ||
+                                             (!current_block.mixed_buckets &&
+                                              current_block.bucket_id == allocation.bucket_id);
+            if (!has_block || !same_kind || !contiguous || !same_replica_bucket ||
+                current_block.entity_count >= block_entity_limit) {
+                flush_block();
+                has_block = true;
+                current_block.offset_bytes = allocation.offset_bytes;
+                current_block.is_replica = allocation.is_replica;
+                current_block.bucket_id = allocation.bucket_id;
+                current_block.first_entity_id = allocation.entity.entity_id;
+            } else if (current_block.bucket_id != allocation.bucket_id) {
+                current_block.mixed_buckets = true;
+            }
+            current_block.span_bytes = allocation_end - current_block.offset_bytes;
+            current_block.used_bytes += allocation.allocated_bytes;
+            ++current_block.entity_count;
+            current_block.last_entity_id = allocation.entity.entity_id;
+        }
+        flush_block();
+
+        if (snapshot.detailed) {
+            node_snapshot.entities = node.allocations;
+        }
         snapshot.total_capacity_bytes += node.memory.size();
         snapshot.total_used_bytes += used_bytes;
-        snapshot.nodes.push_back(MemoryNodeSnapshot{
-            node_id,
-            node.memory.size(),
-            used_bytes,
-            node.allocations,
-        });
+        snapshot.nodes.push_back(std::move(node_snapshot));
     }
     return snapshot;
 }
@@ -483,26 +560,17 @@ bool EntityMemoryCluster::CanReplicateBucket(std::size_t bucket_id,
         return false;
     }
 
-    auto planned = target;
-    bool found_primary = false;
+    std::size_t required_bytes = 0;
     for (const auto& source_node : nodes_) {
         for (const auto& source : source_node.allocations) {
             if (source.bucket_id != bucket_id || source.is_replica) {
                 continue;
             }
-            found_primary = true;
-            const auto offset = FindFreeOffset(planned, source.allocated_bytes);
-            if (offset == std::numeric_limits<std::size_t>::max()) {
-                return false;
-            }
-            auto allocation = source;
-            allocation.node_id = target_node;
-            allocation.offset_bytes = offset;
-            allocation.is_replica = true;
-            planned.allocations.push_back(std::move(allocation));
+            required_bytes += source.allocated_bytes;
         }
     }
-    return found_primary;
+    return required_bytes > 0 &&
+           FindFreeOffset(target, required_bytes) != std::numeric_limits<std::size_t>::max();
 }
 
 bool EntityMemoryCluster::ReplicateBucket(std::size_t bucket_id,
@@ -513,7 +581,18 @@ bool EntityMemoryCluster::ReplicateBucket(std::size_t bucket_id,
     }
 
     auto& target = nodes_[target_node];
-    auto planned = target;
+    std::size_t required_bytes = 0;
+    for (const auto& source_node : nodes_) {
+        for (const auto& source : source_node.allocations) {
+            if (source.bucket_id == bucket_id && !source.is_replica) {
+                required_bytes += source.allocated_bytes;
+            }
+        }
+    }
+    auto next_offset = FindFreeOffset(target, required_bytes);
+    if (required_bytes == 0 || next_offset == std::numeric_limits<std::size_t>::max()) {
+        return false;
+    }
     std::vector<std::pair<EntityAllocation, std::vector<std::uint8_t>>> copies;
     for (const auto& source_node : nodes_) {
         for (const auto& source : source_node.allocations) {
@@ -524,15 +603,14 @@ bool EntityMemoryCluster::ReplicateBucket(std::size_t bucket_id,
             std::vector<std::uint8_t> payload(begin, begin + source.serialized_bytes);
             auto replica = source;
             replica.node_id = target_node;
-            replica.offset_bytes = FindFreeOffset(planned, replica.allocated_bytes);
+            replica.offset_bytes = next_offset;
             replica.is_replica = true;
             replica.expires_after_window = expires_after_window;
-            planned.allocations.push_back(replica);
+            next_offset += replica.allocated_bytes;
             copies.emplace_back(replica, std::move(payload));
         }
     }
 
-    target.allocations = std::move(planned.allocations);
     for (const auto& copy : copies) {
         const auto& allocation = copy.first;
         const auto& payload = copy.second;
@@ -541,26 +619,36 @@ bool EntityMemoryCluster::ReplicateBucket(std::size_t bucket_id,
         std::fill(target.memory.begin() + allocation.offset_bytes + allocation.serialized_bytes,
                   target.memory.begin() + allocation.offset_bytes + allocation.allocated_bytes,
                   0);
+        target.allocations.push_back(allocation);
+        target.used_bytes += allocation.allocated_bytes;
     }
+    std::sort(target.allocations.begin(), target.allocations.end(),
+              [](const auto& left, const auto& right) {
+                  return left.offset_bytes < right.offset_bytes;
+              });
     return !copies.empty();
 }
 
 std::size_t EntityMemoryCluster::ExpireReplicas(std::size_t window_id) {
     std::size_t expired = 0;
     for (auto& node : nodes_) {
-        auto allocation = node.allocations.begin();
-        while (allocation != node.allocations.end()) {
-            if (allocation->is_replica && allocation->expires_after_window < window_id) {
-                std::fill(node.memory.begin() + allocation->offset_bytes,
-                          node.memory.begin() + allocation->offset_bytes +
-                              allocation->allocated_bytes,
+        for (const auto& allocation : node.allocations) {
+            if (allocation.is_replica && allocation.expires_after_window < window_id) {
+                std::fill(node.memory.begin() + allocation.offset_bytes,
+                          node.memory.begin() + allocation.offset_bytes +
+                              allocation.allocated_bytes,
                           0);
-                allocation = node.allocations.erase(allocation);
+                node.used_bytes -= allocation.allocated_bytes;
                 ++expired;
-            } else {
-                ++allocation;
             }
         }
+        node.allocations.erase(
+            std::remove_if(node.allocations.begin(), node.allocations.end(),
+                           [window_id](const auto& allocation) {
+                               return allocation.is_replica &&
+                                      allocation.expires_after_window < window_id;
+                           }),
+            node.allocations.end());
     }
     return expired;
 }

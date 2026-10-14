@@ -345,6 +345,31 @@ void TestPredictionCsvAcceptsWindowsLineEndingsOnLinux() {
             "CRLF prediction row should preserve its numeric value");
 }
 
+void TestLargePlacementUsesBoundedAggregateBlocks() {
+    constexpr std::size_t entity_count = 2500;
+    constexpr std::size_t block_limit = 500;
+    const auto entities = hotbucket::MakeBattlefieldScenario(entity_count);
+    hotbucket::EntityMemoryCluster memory_cluster(5, 64, 1024 * 1024, 64);
+    const auto snapshot = memory_cluster.Allocate(entities, 1000, block_limit);
+
+    Require(!snapshot.detailed, "large placement should omit individual entity details");
+    Require(snapshot.entity_count == entity_count,
+            "aggregate placement should retain the primary entity count");
+    std::size_t counted_entities = 0;
+    for (const auto& node : snapshot.nodes) {
+        Require(node.entities.empty(),
+                "aggregate placement should not copy entity payloads into the snapshot");
+        Require(node.primary_count > 0, "each node should receive primary entities");
+        for (const auto& block : node.blocks) {
+            Require(block.entity_count > 0 && block.entity_count <= block_limit,
+                    "aggregate blocks should obey their entity bound");
+            counted_entities += block.is_replica ? 0 : block.entity_count;
+        }
+    }
+    Require(counted_entities == entity_count,
+            "aggregate blocks should account for every primary entity");
+}
+
 }  // namespace
 
 int main() {
@@ -362,6 +387,7 @@ int main() {
         TestReplicaCopiesAndReclaimsEntityBytes();
         TestReplicaBundleRoundTripAndCorruptionDetection();
         TestPredictionCsvAcceptsWindowsLineEndingsOnLinux();
+        TestLargePlacementUsesBoundedAggregateBlocks();
         std::cout << "all tests passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

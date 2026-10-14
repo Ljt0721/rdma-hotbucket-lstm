@@ -21,7 +21,12 @@ const port = Number(process.env.DASHBOARD_PORT || 8787);
 const logDirectory = path.join(projectRoot, "results", "dashboard", "logs");
 const logPath = path.join(logDirectory, "dashboard-server.jsonl");
 const entityStorePath = process.env.ENTITY_STORE_PATH
-  || path.join(projectRoot, "data", "entity-store", "entities.hbkv");
+  ? path.resolve(projectRoot, process.env.ENTITY_STORE_PATH)
+  : path.join(projectRoot, "data", "entity-store", "entities.hbkv");
+const entityStoreInitialCount = Math.min(
+  100000,
+  Math.max(2, Number.parseInt(process.env.ENTITY_STORE_INITIAL_COUNT || "10", 10) || 10),
+);
 mkdirSync(logDirectory, { recursive: true });
 
 const executableNames = process.platform === "win32"
@@ -168,7 +173,7 @@ function ensureEntityStore() {
   }
   mkdirSync(path.dirname(entityStorePath), { recursive: true });
   execFileSync(executable, [
-    "--entities", "10",
+    "--entities", String(entityStoreInitialCount),
     "--initialize-entity-store", entityStorePath,
   ], { cwd: projectRoot, windowsHide: true });
 }
@@ -389,12 +394,17 @@ async function handleEntityApi(request, response, url) {
     }
 
     if (request.method === "GET" && requestedId === null) {
+      const offset = integerParam(url.searchParams, "offset", 0, 0, entities.length);
+      const limit = integerParam(url.searchParams, "limit", 50, 1, 500);
       sendJson(response, 200, {
         durable: true,
         format: "HBKV v1",
         store: path.relative(projectRoot, entityStorePath),
         count: entities.length,
-        entities: entities.map(publicEntity),
+        offset,
+        limit,
+        hasMore: offset + limit < entities.length,
+        entities: entities.slice(offset, offset + limit).map(publicEntity),
       });
       return true;
     }
@@ -525,7 +535,7 @@ function placementSettings(url) {
   return {
     nodes: integerParam(url.searchParams, "nodes", 5, 2, 16),
     buckets: integerParam(url.searchParams, "buckets", 64, 8, 512),
-    entities: integerParam(url.searchParams, "entities", 10, 2, 100),
+    entities: integerParam(url.searchParams, "entities", 10, 2, 100000),
   };
 }
 
@@ -541,7 +551,7 @@ function simulationSettings(url) {
     policy: allowedPolicies.has(requestedPolicy) ? requestedPolicy : "recent-window",
     nodes: integerParam(params, "nodes", 5, 2, 16),
     buckets: integerParam(params, "buckets", 64, 8, 512),
-    entities: integerParam(params, "entities", 10, 2, 100),
+    entities: integerParam(params, "entities", 10, 2, 100000),
     windows: integerParam(params, "windows", 40, 5, 200),
     requests: integerParam(params, "requests", 4000, 100, 1000000),
     nodeCapacity: integerParam(params, "nodeCapacity", 1800, 100, 1000000),

@@ -172,7 +172,10 @@ function BucketMap({ buckets = [], hotBucket }) {
 }
 
 function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, hotBucket }) {
-  const entities = placement?.nodes?.flatMap((node) => node.entities) || [];
+  const detailed = placement?.detailed !== false;
+  const entities = detailed
+    ? placement?.nodes?.flatMap((node) => node.entities) || []
+    : [];
   const selected = entities.find((entity) => allocationKey(entity) === selectedAllocationKey)
     || entities.find((entity) => !entity.isReplica)
     || entities[0];
@@ -183,7 +186,7 @@ function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, ho
         <div><MemoryStick size={18} /><h2>Entity memory allocation</h2></div>
         <span>
           {placement
-            ? `${placement.primaryCount} primary entities · ${placement.replicaCount} temporary copies`
+            ? `${placement.primaryCount.toLocaleString()} primary entities · ${placement.replicaCount.toLocaleString()} replica records`
             : "Loading placement"}
         </span>
       </div>
@@ -194,19 +197,21 @@ function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, ho
             <div><span>Total pool</span><strong>{formatBytes(placement.totalCapacityBytes)}</strong></div>
             <div><span>Allocated</span><strong>{formatBytes(placement.totalUsedBytes)}</strong></div>
             <div><span>Utilization</span><strong>{formatNumber((placement.totalUsedBytes / placement.totalCapacityBytes) * 100, 1)}%</strong></div>
-            <div><span>Temporary copies</span><strong>{formatNumber(placement.replicaCount)}</strong></div>
+            <div><span>Replica records</span><strong>{formatNumber(placement.replicaCount)}</strong></div>
           </div>
 
           <div className="memory-node-grid">
             {placement.nodes.map((node) => {
               const utilization = (node.usedBytes / node.capacityBytes) * 100;
-              const primaryCount = node.entities.filter((entity) => !entity.isReplica).length;
-              const replicaCount = node.entities.length - primaryCount;
+              const primaryCount = node.primaryCount
+                ?? node.entities.filter((entity) => !entity.isReplica).length;
+              const replicaCount = node.replicaCount
+                ?? node.entities.length - primaryCount;
               return (
                 <article className="memory-node" key={node.id}>
                   <header>
                     <div><Server size={15} /><strong>Node {node.id}</strong></div>
-                    <span>{primaryCount} primary · {replicaCount} copies</span>
+                    <span>{primaryCount.toLocaleString()} primary · {replicaCount.toLocaleString()} replicas</span>
                   </header>
                   <div className="node-memory-stats">
                     <span>{formatBytes(node.usedBytes)} used</span>
@@ -214,42 +219,79 @@ function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, ho
                   </div>
                   <div className="memory-addresses"><span>0 B</span><span>{formatBytes(node.capacityBytes)}</span></div>
                   <div className="memory-pool-track" aria-label={`Node ${node.id} memory layout`}>
-                    {node.entities.map((entity) => {
-                      const left = (entity.offsetBytes / node.capacityBytes) * 100;
-                      const width = (entity.allocatedBytes / node.capacityBytes) * 100;
-                      const isHot = entity.bucketId === hotBucket;
-                      const justCopied = entity.isReplica
-                        && placement.copiedBucket === entity.bucketId
-                        && placement.copiedToNode === entity.nodeId;
-                      return (
-                        <button
-                          key={allocationKey(entity)}
-                          type="button"
-                          className={`memory-segment type-${entity.id % 6} ${entity.isReplica ? "replica" : "primary"} ${isHot ? "hot" : ""} ${justCopied ? "just-copied" : ""}`}
-                          style={{ left: `${left}%`, width: `${width}%` }}
-                          onClick={() => onSelect(allocationKey(entity))}
-                          title={`${entity.callsign} ${entity.isReplica ? "replica" : "primary"}: offset ${entity.offsetBytes} B, allocation ${entity.allocatedBytes} B`}
-                          aria-label={`Select ${entity.callsign}`}
-                        />
-                      );
-                    })}
+                    {detailed
+                      ? node.entities.map((entity) => {
+                          const left = (entity.offsetBytes / node.capacityBytes) * 100;
+                          const width = (entity.allocatedBytes / node.capacityBytes) * 100;
+                          const isHot = entity.bucketId === hotBucket;
+                          const justCopied = entity.isReplica
+                            && placement.copiedBucket === entity.bucketId
+                            && placement.copiedToNode === entity.nodeId;
+                          return (
+                            <button
+                              key={allocationKey(entity)}
+                              type="button"
+                              className={`memory-segment type-${entity.id % 6} ${entity.isReplica ? "replica" : "primary"} ${isHot ? "hot" : ""} ${justCopied ? "just-copied" : ""}`}
+                              style={{ left: `${left}%`, width: `${width}%` }}
+                              onClick={() => onSelect(allocationKey(entity))}
+                              title={`${entity.callsign} ${entity.isReplica ? "replica" : "primary"}: offset ${entity.offsetBytes} B, allocation ${entity.allocatedBytes} B`}
+                              aria-label={`Select ${entity.callsign}`}
+                            />
+                          );
+                        })
+                      : node.blocks.map((block, index) => {
+                          const left = (block.offsetBytes / node.capacityBytes) * 100;
+                          const width = (block.spanBytes / node.capacityBytes) * 100;
+                          const isHot = block.isReplica && block.bucketId === hotBucket;
+                          const justCopied = block.isReplica
+                            && placement.copiedBucket === block.bucketId
+                            && placement.copiedToNode === node.id;
+                          return (
+                            <div
+                              key={`${node.id}-${block.offsetBytes}-${index}`}
+                              className={`memory-block ${block.isReplica ? "replica" : "primary"} ${isHot ? "hot" : ""} ${justCopied ? "just-copied" : ""}`}
+                              style={{ left: `${left}%`, width: `${width}%` }}
+                              title={`${block.entityCount.toLocaleString()} ${block.isReplica ? "replica" : "primary"} entities, ${formatBytes(block.usedBytes)}`}
+                            >
+                              {width >= 12 ? block.entityCount.toLocaleString() : ""}
+                            </div>
+                          );
+                        })}
                   </div>
                   <div className="node-entity-list">
-                    {node.entities.map((entity) => (
-                      <button
-                        key={allocationKey(entity)}
-                        type="button"
-                        className={`${selected && allocationKey(selected) === allocationKey(entity) ? "selected" : ""} ${entity.bucketId === hotBucket ? "hot" : ""} ${entity.isReplica ? "replica" : "primary"}`}
-                        onClick={() => onSelect(allocationKey(entity))}
-                      >
-                        <span className={`entity-color type-${entity.id % 6}`} />
-                        <span className="entity-name">
-                          <strong>{entity.callsign}</strong>
-                          <small>{entity.isReplica ? `Replica · expires after W${entity.expiresAfterWindow + 1}` : entity.entityType}</small>
-                        </span>
-                        <span className="entity-size">{entity.isReplica ? <Copy size={13} /> : null}{formatBytes(entity.allocatedBytes)}</span>
-                      </button>
-                    ))}
+                    {detailed
+                      ? node.entities.map((entity) => (
+                          <button
+                            key={allocationKey(entity)}
+                            type="button"
+                            className={`${selected && allocationKey(selected) === allocationKey(entity) ? "selected" : ""} ${entity.bucketId === hotBucket ? "hot" : ""} ${entity.isReplica ? "replica" : "primary"}`}
+                            onClick={() => onSelect(allocationKey(entity))}
+                          >
+                            <span className={`entity-color type-${entity.id % 6}`} />
+                            <span className="entity-name">
+                              <strong>{entity.callsign}</strong>
+                              <small>{entity.isReplica ? `Replica · expires after W${entity.expiresAfterWindow + 1}` : entity.entityType}</small>
+                            </span>
+                            <span className="entity-size">{entity.isReplica ? <Copy size={13} /> : null}{formatBytes(entity.allocatedBytes)}</span>
+                          </button>
+                        ))
+                      : node.blocks.map((block, index) => (
+                          <div
+                            className={`aggregate-block-row ${block.isReplica ? "replica" : "primary"}`}
+                            key={`${node.id}-summary-${block.offsetBytes}-${index}`}
+                          >
+                            <span className="aggregate-block-mark" />
+                            <span>
+                              <strong>{block.entityCount.toLocaleString()} entities</strong>
+                              <small>
+                                {block.isReplica
+                                  ? `Replica bucket ${block.bucketId ?? "mixed"}`
+                                  : `Primary IDs ${block.firstEntityId}-${block.lastEntityId}`}
+                              </small>
+                            </span>
+                            <b>{formatBytes(block.usedBytes)}</b>
+                          </div>
+                        ))}
                   </div>
                 </article>
               );
@@ -289,6 +331,12 @@ function EntityMemoryAllocation({ placement, selectedAllocationKey, onSelect, ho
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+          {!detailed && (
+            <div className="aggregate-placement-note">
+              <strong>Aggregate placement view</strong>
+              <span>{placement.primaryCount.toLocaleString()} primary records summarized in memory blocks of at most 10,000 entities.</span>
             </div>
           )}
         </>
@@ -417,7 +465,7 @@ export default function App() {
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || `Entity store request failed (${response.status})`);
         setKvStore(payload);
-        setSettings((current) => ({ ...current, entities: Math.min(100, payload.count) }));
+        setSettings((current) => ({ ...current, entities: Math.min(100000, payload.count) }));
       })
       .catch((error) => {
         if (error.name !== "AbortError") setKvMessage(error.message);
@@ -479,7 +527,7 @@ export default function App() {
     const storePayload = await storeResponse.json();
     if (!storeResponse.ok) throw new Error(storePayload.error || "Could not refresh the entity store.");
     setKvStore(storePayload);
-    const entityCount = Math.min(100, storePayload.count);
+    const entityCount = Math.min(100000, storePayload.count);
     setSettings((current) => ({ ...current, entities: entityCount }));
     const placementResponse = await fetch(
       `/api/placement?nodes=${settings.nodes}&buckets=${settings.buckets}&entities=${entityCount}`,
@@ -737,7 +785,7 @@ export default function App() {
           <div className="field-grid">
             <NumberField label="Nodes" name="nodes" value={settings.nodes} min={2} max={16} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Buckets" name="buckets" value={settings.buckets} min={8} max={512} onChange={changeSetting} disabled={status === "running"} />
-            <NumberField label="Entities" name="entities" value={settings.entities} min={2} max={100} onChange={changeSetting} disabled={status === "running"} />
+            <NumberField label="Entities" name="entities" value={settings.entities} min={2} max={100000} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Windows" name="windows" value={settings.windows} min={7} max={200} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Requests / window" name="requests" value={settings.requests} min={100} max={1000000} step={100} onChange={changeSetting} disabled={status === "running"} />
             <NumberField label="Node capacity" name="nodeCapacity" value={settings.nodeCapacity} min={100} max={1000000} step={100} onChange={changeSetting} disabled={status === "running"} />
