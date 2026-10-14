@@ -199,9 +199,35 @@ only windows earlier than its target. Local mode replays those predictions in th
 simulator; Real RDMA mode sends the prediction file to the compute VM and performs every accepted
 copy with `IBV_WR_RDMA_WRITE`. This is reproducible offline inference, not online retraining.
 
-On Windows, the complete start command is:
+### One-time setup after cloning
+
+The current Windows lab machine already has these dependencies. On a fresh checkout, install Git,
+Node.js LTS, Python, CMake, and a C++17 compiler, then run:
 
 ```powershell
+git clone --recurse-submodules https://github.com/Ljt0721/rdma-hotbucket-lstm.git
+cd rdma-hotbucket-lstm
+git checkout agent/open-source-survey
+git submodule update --init --recursive
+
+python -m pip install -r ml/requirements.txt
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+
+cd dashboard
+npm install
+cd ..
+```
+
+The trained checkpoint and default HBKV entity snapshot are versioned in the repository, so normal
+dashboard use does not require retraining the LSTM.
+
+### Local simulation from a stopped project
+
+Local simulation does not require VMware. From PowerShell, build the C++ programs and start the
+API and React development server with one command:
+
+```powershell
+cd "C:\Users\csqlj\Desktop\毕设\rdma-hotbucket-lstm"
 powershell -ExecutionPolicy Bypass -File scripts/start_dashboard.ps1
 ```
 
@@ -218,22 +244,74 @@ npm run dev
 The React development server uses port `5173`; the local simulation API uses port `8787`. Every run
 also writes its full CSV data under `results/dashboard/`.
 
-### Real RDMA dashboard mode
+### Real RDMA cold start on the current lab machine
 
-Power on both Ubuntu VMs before selecting **Real RDMA**. VMware may be minimized after the guests
-have booted, but the VMs must remain running rather than suspended. The default SSH aliases are
-`rdma-memory` and `rdma-client`, and key-based non-interactive login must work from Windows:
+Real RDMA mode uses two Ubuntu guests. `Ubuntu.vmx` is the memory VM and `RDMAClient.vmx` is the
+compute VM. `RDMA1.vmx` is not part of the current experiment. Starting from two powered-off VMs,
+run the following commands in PowerShell:
 
 ```powershell
-ssh -o BatchMode=yes rdma-memory "hostname"
-ssh -o BatchMode=yes rdma-client "hostname"
+$vmrun = "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
+$memoryVmx = "C:\Users\csqlj\Documents\Virtual Machines\Ubuntu\Ubuntu.vmx"
+$clientVmx = "C:\Users\csqlj\Documents\Virtual Machines\RDMAClient\RDMAClient.vmx"
+
+& $vmrun start $memoryVmx nogui
+& $vmrun start $clientVmx nogui
+& $vmrun list
+```
+
+`vmrun list` should report exactly these two running VM files. `nogui` means that VMware may remain
+minimized; both guests continue running in the background. Wait for Ubuntu and SSH to finish
+starting, then verify the expected hostnames, addresses, and Soft-RoCE devices:
+
+```powershell
+ssh -o BatchMode=yes rdma-memory "hostname; ip -brief address; rdma link; ibv_devices"
+ssh -o BatchMode=yes rdma-client "hostname; ip -brief address; rdma link; ibv_devices"
+```
+
+The expected lab state is:
+
+```text
+rdma-memory -> memory-node   -> ens37 192.168.64.128 -> rxe_ens37 ACTIVE
+rdma-client -> compute-client -> ens37 192.168.64.130 -> rxe_ens37 ACTIVE
+```
+
+If SSH reports `Connection timed out`, first run `& $vmrun list`. A timeout normally means the VM
+is powered off, suspended, or has not finished booting; it is not an SSH-key error. If SSH works but
+`rdma link` is empty, restart the existing Soft-RoCE boot service and check it again:
+
+```powershell
+ssh -t rdma-memory "sudo systemctl restart rdma-rxe-ens37.service; rdma link"
+ssh -t rdma-client "sudo systemctl restart rdma-rxe-ens37.service; rdma link"
 ```
 
 The VM binaries must already exist at
 `/home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_replica` and
-`/home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_sim`. The dashboard reports both VM checks
-in the status panel. It then starts and stops the memory services itself when **Start RDMA run** is
-pressed. Readiness can also be checked directly at:
+`/home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_sim`. Verify them, or rebuild the existing
+VM source tree when required:
+
+```powershell
+ssh rdma-memory "test -x /home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_replica && echo replica-ready"
+ssh rdma-client "test -x /home/ljt/rdma-hotbucket-lab/build-test/hotbucket_rdma_sim && echo simulator-ready"
+
+ssh rdma-memory "cmake --build /home/ljt/rdma-hotbucket-lab/build-test -j2"
+ssh rdma-client "cmake --build /home/ljt/rdma-hotbucket-lab/build-test -j2"
+```
+
+Start the Windows dashboard after both VM checks pass:
+
+```powershell
+cd "C:\Users\csqlj\Desktop\毕设\rdma-hotbucket-lstm"
+powershell -ExecutionPolicy Bypass -File scripts/start_dashboard.ps1
+```
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173), select **Real RDMA**, select a policy, and
+press **Start RDMA run**. The dashboard checks both guests, uploads the durable HBKV snapshot and
+optional LSTM predictions, starts one replica service for each selected logical memory node, and
+runs the compute-side simulator. It stops the replica services after the run. A failed VM check
+stops the run rather than silently falling back to local simulation.
+
+The backend readiness result is also available at:
 
 ```text
 http://127.0.0.1:8787/api/rdma/health
@@ -242,6 +320,44 @@ http://127.0.0.1:8787/api/rdma/health
 The defaults can be changed before starting the dashboard with `RDMA_MEMORY_HOST`,
 `RDMA_CLIENT_HOST`, `RDMA_MEMORY_IP`, `RDMA_REMOTE_ROOT`, `RDMA_REMOTE_BUILD`, and
 `RDMA_BASE_PORT` environment variables.
+
+### Why two VMs can display five memory nodes
+
+The two VMs are operating-system hosts, while the node count selected in the dashboard is a logical
+cluster size. The compute VM runs one `hotbucket_rdma_sim`. The memory VM starts independent replica
+services on ports `7600`, `7601`, and so on. Each logical node has its own node ID, listening port,
+RDMA connection/QP, registered memory region, replica map, and sequence counter. This validates
+multi-node placement, routing, replication, and protocol correctness.
+
+All logical memory nodes still share one guest CPU, one guest memory system, and one virtual RNIC.
+The two-VM setup therefore cannot prove the throughput scaling of five physical servers. Simulation
+is used for larger cluster sizes, while this VM setup validates the real verbs/RDMA data path.
+
+### Verify and stop the project
+
+With the dashboard running, a second PowerShell window can run the automated local check:
+
+```powershell
+cd "C:\Users\csqlj\Desktop\毕设\rdma-hotbucket-lstm\dashboard"
+npm run verify:live
+```
+
+This checks recent-window and LSTM runs plus durable entity CREATE, GET, UPDATE, allocation, and
+DELETE. It restores the original entity count at the end. Stop the dashboard with `Ctrl+C` in its
+terminal. Then shut down both guests gracefully:
+
+```powershell
+$vmrun = "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
+$memoryVmx = "C:\Users\csqlj\Documents\Virtual Machines\Ubuntu\Ubuntu.vmx"
+$clientVmx = "C:\Users\csqlj\Documents\Virtual Machines\RDMAClient\RDMAClient.vmx"
+
+& $vmrun stop $clientVmx soft
+& $vmrun stop $memoryVmx soft
+& $vmrun list
+```
+
+Use VMware's normal guest shutdown if a `soft` stop does not return. Avoid `hard` except when a
+guest is unresponsive because it is equivalent to removing power.
 
 ### Debug logs
 
